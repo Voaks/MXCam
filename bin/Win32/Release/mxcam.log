@@ -1,0 +1,22 @@
+[15:19:36.027] MXCam opengl32 proxy loaded (x86 build)
+[15:19:36.030] config: loaded V:\random code\MX Simulator Camera Mod\bin\Win32\Release\mxcam.ini (enabled=1, game camera, modelview='u_modelview', camera program has 'u_heights', up=0.00,1.00,0.00)
+[15:19:36.033] forwarding to C:\Windows\system32\opengl32.dll: 368 exports, 22 hooked, 0 missing
+[15:19:36.223] panel: opened
+[15:19:36.228] overlay: ready (GLSL version 150)
+[15:19:38.919] proc: glCreateShader
+[15:19:38.919] proc: glShaderSource
+[15:19:38.919] proc: glCompileShader
+[15:19:38.919] proc: glCreateProgram
+[15:19:38.919] proc: glAttachShader
+[15:19:38.919] proc: glLinkProgram
+[15:19:38.919] proc: glGetProgramiv
+[15:19:38.919] proc: glUseProgram (wrapped)
+[15:19:38.919] proc: glGetUniformLocation (wrapped)
+[15:19:38.919] proc: glUniformMatrix4fv (wrapped)
+[15:19:38.919] proc: glGetUniformfv
+[15:19:38.919] uniform: program 6 'u_modelview' = location 1
+[15:19:38.919] uniform: program 6 'u_heights' = location 0
+[15:19:38.919] uniform: program 9 'u_modelview' = location 0
+[15:19:39.276] camera: cut detected (38.6 deg, 105.77 units), resetting filters
+[15:19:40.284] bike: tracking an object of program 9 (draw #0): the camera sits at (0.000, 1.200, 0.300) in its space, jitter 11.1 mm; forward axis -Z, up axis +Y
+[15:19:42.934] proc: glActiveTexture
