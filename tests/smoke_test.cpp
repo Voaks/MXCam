@@ -317,6 +317,7 @@ int main(int argc, char** argv)
         using PFN_GetUniformLocation = GLint(APIENTRY*)(GLuint, const char*);
         using PFN_UniformMatrix4fv   = void(APIENTRY*)(GLint, GLsizei, GLboolean, const GLfloat*);
         using PFN_GetUniformfv       = void(APIENTRY*)(GLuint, GLint, GLfloat*);
+        using PFN_Uniform3fv         = void(APIENTRY*)(GLint, GLsizei, const GLfloat*);
 #define PROC(type, name) auto name = reinterpret_cast<type>(p_wglGetProcAddress(#name))
         PROC(PFN_CreateShader, glCreateShader);
         PROC(PFN_ShaderSource, glShaderSource);
@@ -329,6 +330,7 @@ int main(int argc, char** argv)
         PROC(PFN_GetUniformLocation, glGetUniformLocation);
         PROC(PFN_UniformMatrix4fv, glUniformMatrix4fv);
         PROC(PFN_GetUniformfv, glGetUniformfv);
+        PROC(PFN_Uniform3fv, glUniform3fv);
 #undef PROC
         if (!glCreateShader || !glUseProgram || !glUniformMatrix4fv || !glGetUniformfv) {
             printf("    (driver has no OpenGL 2.0 here; skipped)\n");
@@ -354,13 +356,14 @@ int main(int argc, char** argv)
                 "uniform mat4 u_modelview; uniform mat4 u_projection; uniform float u_heights;\n"
                 "void main() { gl_Position = u_projection * u_modelview * gl_Vertex + vec4(u_heights); }");
             const GLuint object = build(
-                "uniform mat4 u_modelview; uniform mat4 u_projection;\n"
-                "void main() { gl_Position = u_projection * u_modelview * gl_Vertex; }");
+                "uniform mat4 u_modelview; uniform mat4 u_projection; uniform vec3 u_light_position;\n"
+                "void main() { gl_Position = u_projection * u_modelview * gl_Vertex + vec4(u_light_position, 0.0); }");
             Check(terrain && object, "test shaders compile and link");
 
             const GLint terrainMv = glGetUniformLocation(terrain, "u_modelview");
             glGetUniformLocation(terrain, "u_heights");
             const GLint objectMv = glGetUniformLocation(object, "u_modelview");
+            const GLint objectLight = glGetUniformLocation(object, "u_light_position");
             Swap(true);
 
             // Frame 1: the terrain upload is the camera.
@@ -393,6 +396,22 @@ int main(int argc, char** argv)
             glUniformMatrix4fv(objectMv, 1, GL_FALSE, identity);
             glGetUniformfv(object, objectMv, readback);
             Check(Near(readback, identity, 1e-7), "identity (2D screen) upload is untouched");
+
+            // Lighting is done in eye space: the light direction (here the raw camera's right
+            // axis) must turn with the view, by the rotation part of C = Corrected * Raw^-1.
+            {
+                float rawInverse[16], correction[16], light[3];
+                RigidInverse(view, rawInverse);
+                Mul(shaderCorrected, rawInverse, correction);
+                const float rawLight[3] = { 1, 0, 0 };
+                glUniform3fv(objectLight, 1, rawLight);
+                glGetUniformfv(object, objectLight, light);
+                double error = 0;
+                for (int r = 0; r < 3; ++r)
+                    error = fmax(error, fabs(light[r] - correction[r]));  // C * (1,0,0) = column 0
+                printf("    light direction (1,0,0) -> (%.3f, %.3f, %.3f)\n", light[0], light[1], light[2]);
+                Check(error < 1e-4 && fabs(light[1]) > 0.1, "the light direction turns with the view (lighting stays put)");
+            }
             Swap();
 
             // Frame 2: the sky (rotation-only view) is drawn before the terrain and must still
@@ -421,26 +440,36 @@ int main(int argc, char** argv)
                 QueryPerformanceCounter(&start);
                 float mount[16], bikeWorld[16], camWorld[16], bikeView[16], scenery[16], wheel[16], spin[16], vm[16];
                 float fork[16], steer[16], skyView[16], skyOut[16];
-                double levelPitch = 0, wheeliePitch = 0, levelEyeLift = 0, maxYaw = 0, maxSkyDiff = 0, maxSkyShift = 0;
+                double levelPitch = 0, wheeliePitch = 0, levelEyeLift = 0, maxYaw = 0, maxSkyDiff = 0, maxSkyShift = 0, maxWobbleRoll = 0;
                 // The custom camera must ignore the game camera's 10 degree look-down. The game camera keeps it,
                 // and learns its resting pitch over a few seconds; earlier sections held it level, so stay close
                 // to level (not exactly: a perfectly level sky is an identity matrix, which is left alone).
                 const double mountPitch = custom ? -10.0 : -1.0;
-                for (;;) {
+                int rideFrame = 0;
+                for (;; ++rideFrame) {
                     QueryPerformanceCounter(&now);
                     const double t = double(now.QuadPart - start.QuadPart) / freq.QuadPart;
                     if (t > 3.3) break;
                     const double bounce = t < 2.0 ? 1.0 : 0.0;
-                    MakeWorld({ 0, 1.2 + bounce * 0.06 * sin(t * 9), 0.3 + bounce * 0.04 * sin(t * 6) }, 0, mountPitch, 0, mount);
+                    const double wobble = t < 2.4 ? 1.0 : 0.0;  // the sprung camera also rolls +-8 degrees against the bike, fast
+                    MakeWorld({ 0, 1.2 + bounce * 0.06 * sin(t * 9), 0.3 + bounce * 0.04 * sin(t * 6) }, 0, mountPitch, wobble * 8 * sin(t * 44), mount);
                     const double bikePitch = t < 2.5 ? 0.0 : 30.0;
                     MakeWorld({ 0, 0.5, 100 - 10 * t }, 0, bikePitch, 0, bikeWorld);
                     Mul(bikeWorld, mount, camWorld);
                     RigidInverse(camWorld, bikeView);
 
-                    // The sky first: rotation only.
+                    // The sky first: rotation only. Every third frame something else rotation-only
+                    // (like a sun billboard, 90 degrees off the camera) is drawn before it: it must
+                    // neither be taken for the camera nor disturb the filters.
                     for (int i = 0; i < 16; ++i)
                         skyView[i] = (i >= 12 && i < 15) ? 0.0f : bikeView[i];
                     glUseProgram(object);
+                    if (rideFrame % 3 == 0) {
+                        float turn[16], billboard[16];
+                        MakeWorld({ 0, 0, 0 }, 90, 0, 0, turn);
+                        Mul(skyView, turn, billboard);
+                        glUniformMatrix4fv(objectMv, 1, GL_FALSE, billboard);
+                    }
                     glUniformMatrix4fv(objectMv, 1, GL_FALSE, skyView);
                     glGetUniformfv(object, objectMv, skyOut);
 
@@ -456,6 +485,11 @@ int main(int argc, char** argv)
                         levelEyeLift = viewEye.y - rawEye.y;
                     } else {
                         wheeliePitch = pitch;
+                    }
+                    if (t > 2.0 && t < 2.4) {  // the camera still wobbles here; the custom view must not
+                        V3 unusedEye; double viewRoll;
+                        Decompose(readback, unusedEye, viewRoll);
+                        maxWobbleRoll = fmax(maxWobbleRoll, fabs(viewRoll));
                     }
                     if (t > 2.0 && t < 2.5)  // forward = -back; yaw away from -Z
                         maxYaw = fmax(maxYaw, fabs(atan2(-double(readback[2]), double(readback[10])) * 180 / 3.14159265358979));
@@ -479,12 +513,13 @@ int main(int argc, char** argv)
                     Mul(bikeView, wheel, vm);
                     glUniformMatrix4fv(objectMv, 1, GL_FALSE, vm);
                     Swap();
-                    Sleep(5);
+                    Sleep(1 + (rideFrame * 7) % 11);  // uneven frame times, 1..11 ms + the frame itself
                 }
                 printf("    level: view pitch %.2f deg (game camera %.0f), eye lifted %.3f, yaw wobble %.2f deg; "
                        "wheelie: %.2f deg (game camera %+.0f)\n", levelPitch, mountPitch, levelEyeLift, maxYaw,
                        wheeliePitch, mountPitch + 30);
-                printf("    sky vs world rotation: max difference %.2g; sky shifted by %.2g\n", maxSkyDiff, maxSkyShift);
+                printf("    sky vs world rotation: max difference %.2g; sky shifted by %.2g; view roll during camera wobble %.2f deg\n",
+                       maxSkyDiff, maxSkyShift, maxWobbleRoll);
                 Check(maxSkyDiff < 1e-4, "the sky turns exactly with this frame's world (no one-frame lag)");
                 Check(maxSkyShift < 1e-6, "the sky is never moved by eye offsets");
                 if (custom) {
@@ -492,19 +527,22 @@ int main(int argc, char** argv)
                     char logPath[MAX_PATH];
                     GetModuleFileNameA(dll, logPath, MAX_PATH);
                     strcpy_s(strrchr(logPath, '\\') + 1, MAX_PATH - (strrchr(logPath, '\\') + 1 - logPath), "mxcam.log");
-                    int locks = 0, losses = 0;
+                    int locks = 0, losses = 0, cuts = 0;
                     FILE* log = _fsopen(logPath, "r", _SH_DENYNO);  // the DLL still has it open for writing
                     if (log) {
                         char line[1024];
                         while (fgets(line, sizeof line, log)) {
                             locks += strstr(line, "bike: tracking") != nullptr;
                             losses += strstr(line, "bike: lost track") != nullptr;
+                            cuts += strstr(line, "deg turn") != nullptr;  // rotation cuts (position cuts between sections are expected)
                         }
                         fclose(log);
                     }
-                    printf("    tracker: locked %d time(s), lost %d time(s)\n", locks, losses);
+                    printf("    tracker: locked %d time(s), lost %d time(s), camera cuts %d\n", locks, losses, cuts);
+                    Check(cuts == 0, "other rotation-only draws and uneven frame times never reset the filters");
                     Check(locks == 1 && losses == 0, "the bike is found once and never lost (camera bounce tolerated)");
                     Check(maxYaw < 0.5, "the view ignores the steering fork");
+                    Check(maxWobbleRoll < 0.6, "the game camera's roll wobble against the bike does not reach the view");
 
                     Check(fabs(levelPitch + 8.0) < 0.5, "custom camera found the bike and uses its own 8 degree look-down");
                     Check(fabs(levelEyeLift - 0.1) < 0.005, "HeadHeight lifts the eye along the bike's up axis");

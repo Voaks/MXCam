@@ -105,6 +105,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\bike.h" />
+    <ClInclude Include="src\motion.h" />
     <ClInclude Include="src\camera.h" />
     <ClInclude Include="src\config.h" />
     <ClInclude Include="src\hooks.h" />

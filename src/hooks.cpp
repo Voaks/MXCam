@@ -256,12 +256,13 @@ bool Pressed(int vk, bool& wasDown)
 
 void PollHotkeys()
 {
-    static bool toggleDown = false, reloadDown = false, dumpDown = false;
+    static bool toggleDown = false, reloadDown = false, dumpDown = false, traceDown = false;
     const Config& cfg = GetConfig();
     // Always sample all keys so the edge detection stays in sync while unfocused.
     const bool toggle = Pressed(cfg.toggleKey, toggleDown);
     const bool reload = Pressed(cfg.reloadKey, reloadDown);
     const bool dump   = Pressed(cfg.dumpKey, dumpDown);
+    const bool trace  = Pressed(cfg.traceKey, traceDown);
     if (!GameHasFocus())
         return;
 
@@ -276,6 +277,8 @@ void PollHotkeys()
     }
     if (dump)
         g_dumpRequested = true;
+    if (trace)
+        StartTrace(10.0);
 }
 
 void EndFrame()

@@ -9,6 +9,7 @@ namespace mxcam {
 namespace {
 
 HANDLE  g_file = INVALID_HANDLE_VALUE;
+wchar_t g_directory[1024] = L"";
 SRWLOCK g_lock = SRWLOCK_INIT;
 
 }  // namespace
@@ -17,7 +18,15 @@ void LogOpen(const wchar_t* path)
 {
     g_file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
+    wcsncpy_s(g_directory, path, _TRUNCATE);
+    wchar_t* slash = wcsrchr(g_directory, L'\\');
+    if (slash)
+        slash[1] = L'\0';
+    else
+        g_directory[0] = L'\0';
 }
+
+const wchar_t* LogDirectory() { return g_directory; }
 
 void LogClose()
 {

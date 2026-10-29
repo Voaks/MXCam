@@ -11,10 +11,18 @@
 //     - every rigid u_modelview upload is replaced with C * M - this covers the world and the
 //       rider's own bike;
 //     - the sky is drawn before the terrain with a rotation-only view. That rotation is enough
-//       to work out this frame's view orientation early (camera::OrientFrame), and the sky
-//       gets only the rotation part of C, so eye offsets never move it;
+//       to preview this frame's view orientation (camera::PreviewRotation), and the sky gets
+//       only the rotation part of C, so eye offsets never move it. Other rotation-only draws
+//       can come first (tens of degrees off the camera), so the one closest to the last camera
+//       rotation is taken as the sky; a preview never changes the filter state;
 //     - uploads that aren't rigid (HUD elements are scaled down or flattened) or are exactly
 //       identity (2D screens) are left alone.
+//     - lighting is computed in eye space, so the light direction ('u_light_position',
+//       Config::lightUniform) arrives already turned by the game's view. It gets the rotation
+//       part of C too, or turning the view would turn the lighting with it;
+//     - reflections look up an environment map through 'u_envmat' (eye -> world rotation, the
+//       transpose of the view's), which becomes u_envmat * C^T so reflections stay put.
+//   TraceKey (F11) records a per-frame trace (mxcam_trace.csv) for diagnosing jerks.
 //   Uniform names are logged as the game looks them up, and every upload goes into the F10 dump.
 
 #include <windows.h>
@@ -22,6 +30,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <share.h>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +50,8 @@ using PFN_GetUniformLocation      = GLint (APIENTRY*)(GLuint program, const GLch
 using PFN_UniformMatrix4fv        = void (APIENTRY*)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 using PFN_ProgramUniformMatrix4fv = void (APIENTRY*)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 using PFN_Uniform4fv              = void (APIENTRY*)(GLint location, GLsizei count, const GLfloat* value);
+using PFN_Uniform3fv              = PFN_Uniform4fv;
+using PFN_UniformMatrix3fv        = PFN_UniformMatrix4fv;
 
 // Real driver functions, filled in by WrapProc() when the game first asks for them.
 // The ARB variants have the same signatures (GLhandleARB is an unsigned int on Windows).
@@ -53,6 +64,10 @@ PFN_UniformMatrix4fv        real_glUniformMatrix4fvARB     = nullptr;
 PFN_ProgramUniformMatrix4fv real_glProgramUniformMatrix4fv = nullptr;
 PFN_Uniform4fv              real_glUniform4fv              = nullptr;
 PFN_Uniform4fv              real_glUniform4fvARB           = nullptr;
+PFN_Uniform3fv              real_glUniform3fv              = nullptr;
+PFN_Uniform3fv              real_glUniform3fvARB           = nullptr;
+PFN_UniformMatrix3fv        real_glUniformMatrix3fv        = nullptr;
+PFN_UniformMatrix3fv        real_glUniformMatrix3fvARB     = nullptr;
 
 constexpr int kMaxLookupsLogged = 500;
 
@@ -60,6 +75,8 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 std::unordered_set<std::string> g_fetched;                       // names already logged
 std::unordered_map<unsigned long long, std::string> g_uniforms;  // (program << 32 | location) -> name
 std::unordered_set<unsigned long long> g_modelviewUniforms;      // (program, location) of each u_modelview
+std::unordered_set<unsigned long long> g_lightUniforms;          // (program, location) of each light direction
+std::unordered_set<unsigned long long> g_envUniforms;            // (program, location) of each environment-map matrix
 std::unordered_set<GLuint> g_cameraPrograms;                     // programs that draw the terrain
 int     g_lookupsLogged = 0;
 GLuint  g_program = 0;                                           // program bound by glUseProgram
@@ -67,12 +84,24 @@ GLuint  g_program = 0;                                           // program boun
 struct ShaderCamera {
     bool   haveCorrection    = false;  // the camera was found (this frame, or last frame until it is)
     double correction[16]    = {};     // full eye-space correction, for everything with a position
-    double rotationOnly[16]  = {};     // its rotation alone, for the sky
+    double rotationOnly[16]  = {};     // its rotation alone, for the sky (this frame's preview once there is one)
     bool   capturedThisFrame = false;
-    bool   orientedThisFrame = false;  // the sky already supplied this frame's camera rotation
+    bool   havePreview       = false;  // rotationOnly is this frame's preview
+    double skyAngle          = 0;      // how far the chosen sky is from the last camera rotation
+    int    previews          = 0;      // rotation-only draws taken as the sky this frame
+    int    otherRotations    = 0;      // rotation-only draws that were not the camera
     int    correctedThisFrame = 0;
 };
 ShaderCamera g_camera;
+
+// Rotation-only draws further than this from the last camera rotation are not the sky.
+constexpr double kMaxSkyAngleDeg = 45.0;
+
+// Per-frame trace (TraceKey).
+FILE*  g_trace       = nullptr;
+int    g_traceFrames = 0;
+double g_traceStart  = -1;
+double g_traceEnd    = 0;
 
 unsigned long long UniformKey(GLuint program, GLint location)
 {
@@ -92,6 +121,10 @@ void NoteUniformLocation(GLuint program, const GLchar* name, GLint location)
     const bool added = g_uniforms.emplace(key, name).second;
     if (strcmp(name, cfg.modelviewUniform) == 0)
         g_modelviewUniforms.insert(key);
+    if (strcmp(name, cfg.lightUniform) == 0)
+        g_lightUniforms.insert(key);
+    if (strcmp(name, cfg.envUniform) == 0)
+        g_envUniforms.insert(key);
     if (strcmp(name, cfg.cameraProgramUniform) == 0)
         g_cameraPrograms.insert(program);
     const bool log = added && g_lookupsLogged < kMaxLookupsLogged;
@@ -123,7 +156,7 @@ void DumpUniform(const char* call, GLuint program, GLint location, GLsizei count
     char numbers[256] = "";
     int length = 0;
     for (int i = 0; i < floats && length < static_cast<int>(sizeof numbers) - 16; ++i)
-        length += snprintf(numbers + length, sizeof numbers - length, "%s% .3f", i && i % 4 == 0 ? " |" : "", value[i]);
+        length += snprintf(numbers + length, sizeof numbers - length, "%s% .3f", i && i % (floatsPerElement % 3 == 0 ? 3 : 4) == 0 ? " |" : "", value[i]);
     DumpCall("%s prog=%u loc=%d '%s' count=%d%s [%s]", call, program, location,
              UniformName(program, location).c_str(), count, transpose ? " TRANSPOSED" : "", numbers);
 }
@@ -158,6 +191,27 @@ bool IsIdentity(const GLfloat* m)
 bool HasTranslation(const GLfloat* m)
 {
     return std::fabs(m[12]) + std::fabs(m[13]) + std::fabs(m[14]) > 1e-3f;
+}
+
+// A rotation-only view drawn before the camera is known this frame: if it is the closest yet to
+// the last camera rotation (the sky), preview this frame's orientation from it. Anything further
+// off - clouds, a sun billboard, a reflection pass - takes whatever correction is current.
+void ConsiderSkyRotation(const double view[16])
+{
+    if (g_camera.capturedThisFrame || !g_camera.haveCorrection)
+        return;
+    const double angle = camera::AngleToLastCameraDeg(view);
+    if (angle < 0 || angle > kMaxSkyAngleDeg || (g_camera.havePreview && angle >= g_camera.skyAngle)) {
+        ++g_camera.otherRotations;
+        DumpCall("^ rotation only, %.1f deg from the camera: not taken as the sky", angle);
+        return;
+    }
+    if (camera::PreviewRotation(view, g_camera.rotationOnly)) {
+        g_camera.havePreview = true;
+        g_camera.skyAngle = angle;
+        ++g_camera.previews;
+        DumpCall("^ SKY (%.2f deg from last frame's camera): orientation previewed for this frame", angle);
+    }
 }
 
 // Returns the matrix to actually upload: value itself, or scratch holding C * value.
@@ -205,14 +259,10 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         // so the sky turns in step with this frame's world instead of last frame's. Only the
         // rotation is applied: the sky is infinitely far away, so eye offsets (neck, head
         // position) must not move it.
-        if (!g_camera.capturedThisFrame && !g_camera.orientedThisFrame && g_camera.haveCorrection) {
-            double view[16];
-            for (int i = 0; i < 16; ++i)
-                view[i] = value[i];
-            g_camera.orientedThisFrame = camera::OrientFrame(view) && camera::RotationCorrection(g_camera.rotationOnly);
-            if (g_camera.orientedThisFrame)
-                DumpCall("^ SKY: orientation worked out for this frame");
-        }
+        double view[16];
+        for (int i = 0; i < 16; ++i)
+            view[i] = value[i];
+        ConsiderSkyRotation(view);
     } else if (g_camera.capturedThisFrame) {
         bike::Observe(program, value);  // raw View * Model: one of the candidates for the bike
     }
@@ -283,17 +333,107 @@ void APIENTRY Wrap_glProgramUniformMatrix4fv(GLuint program, GLint location, GLs
     real_glProgramUniformMatrix4fv(program, location, count, transpose, CorrectModelview(program, location, count, transpose, value, scratch));
 }
 
+// Light directions (and positions) arrive in the game's eye space; returns them turned into
+// ours, in scratch, or value itself if this isn't a light uniform. Directions (vec3, or vec4 with
+// w = 0) get the rotation only; a vec4 position with w != 0 gets the full correction.
+constexpr GLsizei kMaxLights = 16;
+const GLfloat* CorrectLight(GLint location, GLsizei count, const GLfloat* value, int components, GLfloat* scratch)
+{
+    if (!GetConfig().enabled || !value || count <= 0 || count > kMaxLights || !g_camera.haveCorrection)
+        return value;
+    AcquireSRWLockShared(&g_lock);
+    const bool isLight = g_lightUniforms.count(UniformKey(g_program, location)) != 0;
+    ReleaseSRWLockShared(&g_lock);
+    if (!isLight)
+        return value;
+
+    for (GLsizei i = 0; i < count; ++i) {
+        const GLfloat* v = value + i * components;
+        GLfloat* out = scratch + i * components;
+        const double w = components == 4 ? v[3] : 0.0;
+        const double* m = w != 0 ? g_camera.correction : g_camera.rotationOnly;
+        for (int r = 0; r < 3; ++r)
+            out[r] = static_cast<GLfloat>(m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * w);
+        if (components == 4)
+            out[3] = v[3];
+    }
+    return scratch;
+}
+
+// The environment-map matrix turns eye-space reflection vectors into world space: it is the
+// transpose of the view rotation. It's uploaded before the sky, so it can also supply this
+// frame's camera rotation. Ours: (C R)^T = R^T C^T = u_envmat * C^T.
+const GLfloat* CorrectEnvMatrix(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value, GLfloat* scratch)
+{
+    if (!GetConfig().enabled || !value || count != 1 || transpose)
+        return value;
+    AcquireSRWLockShared(&g_lock);
+    const bool isEnv = g_envUniforms.count(UniformKey(g_program, location)) != 0;
+    ReleaseSRWLockShared(&g_lock);
+    if (!isEnv)
+        return value;
+
+    double view[16] = {};  // R = u_envmat^T as a rotation-only view: R(r, c) = value[r * 3 + c]
+    for (int c = 0; c < 3; ++c)
+        for (int r = 0; r < 3; ++r)
+            view[c * 4 + r] = value[r * 3 + c];
+    view[15] = 1;
+    ConsiderSkyRotation(view);
+    if (!g_camera.haveCorrection)
+        return value;
+    const double* m = g_camera.capturedThisFrame ? g_camera.correction : g_camera.rotationOnly;
+    for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r) {
+            double sum = 0;  // (E C^T)(r, c) = sum_k E(r, k) C(c, k)
+            for (int k = 0; k < 3; ++k)
+                sum += value[k * 3 + r] * m[k * 4 + c];
+            scratch[c * 3 + r] = static_cast<GLfloat>(sum);
+        }
+    }
+    return scratch;
+}
+
 // Some engines upload matrices as arrays of vec4.
 void APIENTRY Wrap_glUniform4fv(GLint location, GLsizei count, const GLfloat* value)
 {
     DumpUniform("glUniform4fv", g_program, location, count, 0, value, 4);
-    real_glUniform4fv(location, count, value);
+    GLfloat scratch[kMaxLights * 4];
+    real_glUniform4fv(location, count, CorrectLight(location, count, value, 4, scratch));
 }
 
 void APIENTRY Wrap_glUniform4fvARB(GLint location, GLsizei count, const GLfloat* value)
 {
     DumpUniform("glUniform4fvARB", g_program, location, count, 0, value, 4);
-    real_glUniform4fvARB(location, count, value);
+    GLfloat scratch[kMaxLights * 4];
+    real_glUniform4fvARB(location, count, CorrectLight(location, count, value, 4, scratch));
+}
+
+void APIENTRY Wrap_glUniform3fv(GLint location, GLsizei count, const GLfloat* value)
+{
+    DumpUniform("glUniform3fv", g_program, location, count, 0, value, 3);
+    GLfloat scratch[kMaxLights * 3];
+    real_glUniform3fv(location, count, CorrectLight(location, count, value, 3, scratch));
+}
+
+void APIENTRY Wrap_glUniform3fvARB(GLint location, GLsizei count, const GLfloat* value)
+{
+    DumpUniform("glUniform3fvARB", g_program, location, count, 0, value, 3);
+    GLfloat scratch[kMaxLights * 3];
+    real_glUniform3fvARB(location, count, CorrectLight(location, count, value, 3, scratch));
+}
+
+void APIENTRY Wrap_glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
+{
+    DumpUniform("glUniformMatrix3fv", g_program, location, count, transpose, value, 9);
+    GLfloat scratch[9];
+    real_glUniformMatrix3fv(location, count, transpose, CorrectEnvMatrix(location, count, transpose, value, scratch));
+}
+
+void APIENTRY Wrap_glUniformMatrix3fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
+{
+    DumpUniform("glUniformMatrix3fvARB", g_program, location, count, transpose, value, 9);
+    GLfloat scratch[9];
+    real_glUniformMatrix3fvARB(location, count, transpose, CorrectEnvMatrix(location, count, transpose, value, scratch));
 }
 
 struct ProcWrapper {
@@ -310,6 +450,8 @@ const ProcWrapper kWrappers[] = {
     MXCAM_WRAP(glUniformMatrix4fv),        MXCAM_WRAP(glUniformMatrix4fvARB),
     MXCAM_WRAP(glProgramUniformMatrix4fv),
     MXCAM_WRAP(glUniform4fv),              MXCAM_WRAP(glUniform4fvARB),
+    MXCAM_WRAP(glUniform3fv),              MXCAM_WRAP(glUniform3fvARB),
+    MXCAM_WRAP(glUniformMatrix3fv),        MXCAM_WRAP(glUniformMatrix3fvARB),
 };
 
 }  // namespace
@@ -340,23 +482,83 @@ void* WrapProc(const char* name, void* real)
     return match->wrapper;
 }
 
+void StartTrace(double seconds)
+{
+    if (g_trace)
+        return;
+    wchar_t path[1024];
+    swprintf_s(path, L"%smxcam_trace.csv", LogDirectory());
+    g_trace = _wfsopen(path, L"w", _SH_DENYWR);
+    if (!g_trace) {
+        Log("trace: could not create %ls", path);
+        return;
+    }
+    fprintf(g_trace, "time_ms,interval_ms,step_ms,sky_previews,other_rotations,cut,reset,bike,bike_fresh,custom,"
+                     "raw_yaw,raw_pitch,raw_roll,bike_yaw,bike_pitch,bike_roll,view_yaw,view_pitch,view_roll,"
+                     "lag_deg,look_yaw,whip_deg,air,fall_g,accel_up_g,neck_mm,"
+                     "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz\n");
+    g_traceFrames = 0;
+    g_traceStart  = -1;
+    g_traceEnd    = seconds;
+    Log("trace: recording %.0f s to %ls", seconds, path);
+}
+
+namespace {
+
+// One line per frame while a trace is recording.
+void TraceFrame(bool captured)
+{
+    const double now = camera::ContentTime();
+    if (g_traceStart < 0)
+        g_traceStart = now;
+    if (now - g_traceStart > g_traceEnd) {
+        fclose(g_trace);
+        g_trace = nullptr;
+        Log("trace: %d frames written to mxcam_trace.csv", g_traceFrames);
+        return;
+    }
+    const camera::Telemetry& t = camera::LastTelemetry();
+    if (!captured) {
+        fprintf(g_trace, "%.1f,no camera\n", (now - g_traceStart) * 1000.0);
+        return;
+    }
+    ++g_traceFrames;
+    fprintf(g_trace,
+            "%.1f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%.2f,"
+            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+            "%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,"
+            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+            (now - g_traceStart) * 1000.0, t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
+            t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
+            t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
+            t.lagDeg, t.lookYawDeg, t.whipDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
+            t.rawPos[0], t.rawPos[1], t.rawPos[2], t.eyeOffset[0], t.eyeOffset[1], t.eyeOffset[2]);
+}
+
+}  // namespace
+
 bool EndShaderFrame()
 {
     const bool captured = g_camera.capturedThisFrame;
     if (captured)
-        bike::EndFrame();
+        bike::EndFrame(camera::ContentTime(), camera::FrameInterval());
     if (IsDumping())
-        Log("  shader path: camera %s, %d '%s' uploads corrected", captured ? "found" : "NOT found",
-            g_camera.correctedThisFrame, GetConfig().modelviewUniform);
+        Log("  shader path: camera %s, %d '%s' uploads corrected, %d sky preview(s), %d other rotation-only draw(s)",
+            captured ? "found" : "NOT found", g_camera.correctedThisFrame, GetConfig().modelviewUniform,
+            g_camera.previews, g_camera.otherRotations);
+    if (g_trace)
+        TraceFrame(captured);
+    camera::FrameTick();
 
     // No camera this frame (menu, replay, effect off): don't carry a stale correction into the
     // next frame's sky.
-    if (!captured) {
+    if (!captured)
         g_camera.haveCorrection = false;
-        camera::AbandonFrame();
-    }
     g_camera.capturedThisFrame = false;
-    g_camera.orientedThisFrame = false;
+    g_camera.havePreview = false;
+    g_camera.skyAngle = 0;
+    g_camera.previews = 0;
+    g_camera.otherRotations = 0;
     g_camera.correctedThisFrame = 0;
     return captured;
 }

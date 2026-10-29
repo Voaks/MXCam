@@ -12,12 +12,15 @@ struct Config {
     int    reloadKey = 0x78;  // VK_F9
     int    dumpKey   = 0x79;  // VK_F10
     int    menuKey   = 0x45;  // 'E': in-game settings panel
+    int    traceKey  = 0x7A;  // VK_F11: record a 10 s per-frame trace
 
     // [Detection]
     // Shader path (MX Simulator): matrices arrive as glUniformMatrix4fv uploads. Both names are
     // read once at startup, because uniform roles are assigned as the game looks them up.
     char   modelviewUniform[64]     = "u_modelview";  // per-object View * Model uniform
     char   cameraProgramUniform[64] = "u_heights";    // a uniform only the terrain shader has
+    char   lightUniform[64]         = "u_light_position";  // light direction, sent in eye space
+    char   envUniform[64]           = "u_envmat";    // reflection lookup rotation (eye -> world)
     int    viewMatrixIndex  = 0;          // fixed-function path: which perspective-pass modelview load is the camera
     double worldUp[3]       = { 0, 1, 0 };
     double snapAngleDeg     = 60.0;       // bigger jumps are camera cuts: reset the filters

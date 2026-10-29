@@ -21,19 +21,27 @@ void BeginFrame(const double view[16]);
 void Observe(unsigned program, const float viewModel[16]);
 
 // Called once per frame after drawing. Matches this frame's objects against the tracks.
-void EndFrame();
+// contentTime: the time this frame's content belongs to (s); frameDt: the smoothed frame interval.
+void EndFrame(double contentTime, double frameDt);
 
 // Forget every track (e.g. when the effect is switched off).
 void Reset();
 
 struct Pose {
     bool   tracked = false;
-    // The bike's transform in the previous frame's camera space (View * Model as uploaded).
-    // The camera is rigidly mounted, so this also holds in the current frame's camera space.
+    bool   fresh   = false;  // the bike was matched in the latest frame (world values are current)
+    // The bike's transform in the latest matched frame's camera space (View * Model as uploaded).
     double cameraSpace[16] = {};
     // The bike model's own axes for "forward" and "up", in model space (unit, axis-aligned).
     double forward[3] = { 0, 0, -1 };
     double up[3]      = { 0, 1, 0 };
+    // The bike's forward / up in world space in the latest matched frame. Unlike cameraSpace
+    // these don't move when the game's sprung camera wobbles against the bike.
+    double worldForward[3] = { 0, 0, -1 };
+    double worldUp[3]      = { 0, 1, 0 };
+    // The bike's own vertical acceleration along WorldUp, in g (free fall: -1).
+    bool   haveAccel      = false;
+    double verticalAccelG = 0;
 };
 
 const Pose& Current();

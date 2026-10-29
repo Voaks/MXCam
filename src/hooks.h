@@ -39,4 +39,7 @@ void* WrapProc(const char* name, void* real);
 // this frame.
 bool EndShaderFrame();
 
+// Starts writing one line per frame to mxcam_trace.csv for the given number of seconds.
+void StartTrace(double seconds);
+
 }  // namespace mxcam

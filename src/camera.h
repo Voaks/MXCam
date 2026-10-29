@@ -10,9 +10,10 @@
 namespace mxcam {
 namespace camera {
 
-// Last frame's internals, for the frame dump.
+// Last frame's internals, for the frame dump and the trace.
 struct Telemetry {
-    double dtMs              = 0;
+    double dtMs              = 0;  // the step the filters took (smoothed frame interval)
+    double rawIntervalMs     = 0;  // the last measured swap-to-swap interval
     double lagDeg            = 0;  // smoothed view vs target
     double rawRollDeg        = 0;  // bike (or game camera) roll relative to the horizon
     double rollCorrectionDeg = 0;  // final view roll minus the game camera's roll
@@ -22,31 +23,52 @@ struct Telemetry {
     double whipDeg           = 0;  // whip-centering turn applied to the view
     double airborne          = 0;  // 0..1
     bool   bikeTracked       = false;
+    bool   bikeFresh         = false;  // the bike's own world pose was used (not carried via the camera)
     bool   customActive      = false;
+    double customWeight      = 0;
+    bool   cut               = false;  // the raw camera snapped this frame (look key, camera switch)
+    bool   reset             = false;  // every filter started over this frame
     double verticalAccelG    = 0;
+    double fallG             = 0;      // vertical acceleration used for airborne detection
     double neckOffset        = 0;  // spring displacement along WorldUp (negative = compressed)
     double verticalOffset    = 0;  // total eye height change (smoothing + neck)
+    // Attitudes in degrees: yaw (heading about WorldUp), pitch, roll.
+    double rawYaw = 0, rawPitch = 0, rawRoll = 0;     // game camera
+    double bikeYaw = 0, bikePitch = 0, bikeRoll = 0;  // bike (0 when not tracked)
+    double outYaw = 0, outPitch = 0, outRoll = 0;     // our view
+    double rawPos[3] = {};                            // game camera position
+    double eyeOffset[3] = {};                         // our eye minus the game camera's
 };
 
 // Forget all filter history; the next Update() starts from the raw camera again.
 void Reset();
 
+// Called once per presented frame (at the buffer swap). Measures the frame interval; all
+// filters step by a smoothed version of it, so timing jitter can't make the view judder.
+void FrameTick();
+
+// Time the content of the frame being drawn belongs to (the previous swap), in seconds, and
+// the smoothed frame interval.
+double ContentTime();
+double FrameInterval();
+
 // view: the game's raw world->eye matrix (column-major). Returns false - leaving the frame
 // untouched - if it isn't a rigid camera transform (e.g. the wrong load was picked).
-// Runs OrientFrame() unless it already ran this frame for the same rotation, then the position
-// half of the pipeline.
+// Advances every filter by one frame.
 bool Update(const double view[16], double correction[16]);
 
-// First half only: works out the view's orientation from any matrix that carries this frame's
-// raw camera rotation (e.g. the sky's rotation-only view, drawn before the camera position).
-bool OrientFrame(const double view[16]);
+// Works out, without advancing anything, the rotation-only correction this frame will get if
+// `view` carries this frame's raw camera rotation (the sky's rotation-only view is drawn before
+// the camera position is known). Returns false - out untouched - if view isn't a rotation.
+bool PreviewRotation(const double view[16], double out[16]);
 
-// Rotation-only correction (no translation) for the orientation worked out this frame. Things
-// drawn infinitely far away, like the sky, take this instead of the full correction.
+// Angle in degrees between view's rotation and the last raw camera rotation (0 before the
+// first frame, -1 if view isn't a rotation). The caller uses it to tell the sky (within a few
+// degrees) from other rotation-only draws before calling PreviewRotation().
+double AngleToLastCameraDeg(const double view[16]);
+
+// Rotation-only correction of the last Update().
 bool RotationCorrection(double out[16]);
-
-// The frame ended without a camera: forget a pending OrientFrame().
-void AbandonFrame();
 
 const Telemetry& LastTelemetry();
 

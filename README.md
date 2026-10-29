@@ -50,6 +50,7 @@ modified game files before you race online with it.
 | F8  | Turn the effect on or off. Leave it off for third-person, replays and menus. |
 | F9  | Reload `mxcam.ini` without restarting the game. |
 | F10 | Dump every matrix call of the next frame to `mxcam.log`. |
+| F11 | Record 10 s of per-frame camera data to `mxcam_trace.csv` (`TraceKey`), for reporting jerks. |
 
 ## First run: finding the camera matrix
 
@@ -106,7 +107,10 @@ must stay within a few tens of centimetres, and the object's orientation relativ
 must barely change. Scenery and other riders slide away by metres, wheels spin and the fork
 steers, so the bike frame wins. The lock is held through gaps of up to half a second, and the
 custom camera eases in and out instead of snapping. The bike's forward and up model axes are
-taken as the ones nearest the camera's. The log says when the bike is found or lost, and the
+taken as the ones nearest the camera's. The custom camera then uses the bike's own world-space
+orientation, so the game camera's wobble against the bike never reaches the view, and the
+bike's own vertical acceleration decides when you're airborne (for whip centering), so camera
+bounces on the ground can't fake a jump. The log says when the bike is found or lost, and the
 F10 dump lists every track with its bounce and wobble.
 
 **Rewriting the view (`src/camera.cpp`).** The raw view is split into a head orientation
@@ -178,6 +182,7 @@ restores every piece of GL state it touches, and costs nothing while it's closed
 | `SpringHz` / `DampingRatio` | 3.0 / 0.5 | Neck stiffness and bounce. |
 | `MaxCompression` / `MaxExtension` | 0.07 / 0.04 | End stops for neck travel. |
 | `NodDegPerMeter` | 40 | Forward head nod per unit of compression. |
+| `AccelFilterHz` | 12 | Speed of the velocity / acceleration estimate (fit window = 1.2 / value s). |
 
 `mxcam.ini` has a comment on every key.
 
@@ -190,8 +195,22 @@ restores every piece of GL state it touches, and costs nothing while it's closed
   matrix) and corrects every rigid `u_modelview` upload. Scaled uploads (HUD) and identity uploads
   (2D screens) are left alone. The sky is drawn before the terrain with a rotation-only view.
   That rotation is all the orientation half of the pipeline needs, so the view's orientation is
-  worked out at the sky and the sky turns in step with the world in the same frame. The sky
+  previewed at the sky and the sky turns in step with the world in the same frame. The sky
   gets only the rotation part of the correction, so the neck and head offsets never move it.
+  A preview runs on a copy of the filter state: only the terrain, once per frame, advances the
+  filters. The game also draws other rotation-only things before the terrain, tens of degrees
+  off the camera; the one closest to last frame's camera is taken as the sky, and the others
+  can never step or reset the filters. (Before this, such a draw reset every filter twice in a
+  row a few times a second, which showed as constant stutter.)
+  Every filter steps by the smoothed frame interval, and velocity and acceleration come from a
+  least-squares fit over the last ~0.1 s (`src/motion.h`). Uneven frame timing can't make the
+  view judder or fake a jump.
+  Reflections use `u_envmat` (`EnvMatrixUniform`), the eye-to-world rotation, which gets the
+  same correction so chrome and paint reflections don't swim when the view is leveled.
+  Lighting is computed in eye space: the light direction (`u_light_position`, set by
+  `LightUniform`) arrives already turned by the game's view, so it gets the same rotation as the
+  view. Without that, leveling the horizon would also tilt the sun, and the track would get
+  lighter or darker as you ride.
 - **Cameras built from `glRotate` / `glTranslate` / `gluLookAt`.** The camera is only detected
   through a load, or a multiply onto identity. With `gluLookAt` the rotation is still smoothed
   and leveled, but the position-based neck physics sees no movement.
@@ -220,6 +239,8 @@ cases by reading the modelview matrix back from the driver:
 - Push/pop of an ortho projection for a HUD is handled.
 - The identity-plus-multiply camera idiom is corrected like a load.
 - The neck compresses on a simulated landing, then recovers.
+- A rotation-only draw 90° off the camera before the sky, and uneven frame times, never reset
+  the filters, and the sky still turns exactly with the world.
 
 Build and run it from a Developer Command Prompt that matches the DLL's bitness:
 

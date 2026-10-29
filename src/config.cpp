@@ -181,9 +181,12 @@ void ReloadConfig()
     c.reloadKey = ReadInt(L"General", L"ReloadKey", c.reloadKey);
     c.dumpKey   = ReadInt(L"General", L"DumpKey", c.dumpKey);
     c.menuKey   = ReadInt(L"General", L"MenuKey", c.menuKey);
+    c.traceKey  = ReadInt(L"General", L"TraceKey", c.traceKey);
 
     ReadString(L"Detection", L"ModelviewUniform", c.modelviewUniform);
     ReadString(L"Detection", L"CameraProgramUniform", c.cameraProgramUniform);
+    ReadString(L"Detection", L"LightUniform", c.lightUniform);
+    ReadString(L"Detection", L"EnvMatrixUniform", c.envUniform);
     c.viewMatrixIndex  = ReadInt(L"Detection", L"ViewMatrixIndex", c.viewMatrixIndex);
     ReadVector(L"Detection", L"WorldUp", c.worldUp);
     c.snapAngleDeg     = ReadDouble(L"Detection", L"SnapAngleDeg", c.snapAngleDeg);
