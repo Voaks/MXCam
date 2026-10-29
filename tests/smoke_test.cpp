@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <share.h>
 #include <vector>
 
 namespace {
@@ -395,38 +396,53 @@ int main(int argc, char** argv)
             Swap();
 
             // Frame 2: the sky (rotation-only view) is drawn before the terrain and must still
-            // be corrected, using the previous frame's correction.
+            // be corrected: its rotation lets this frame's orientation be worked out early.
             float sky[16];
             for (int i = 0; i < 16; ++i)
                 sky[i] = (i >= 12 && i < 15) ? 0.0f : view[i];
             glUniformMatrix4fv(objectMv, 1, GL_FALSE, sky);
             glGetUniformfv(object, objectMv, readback);
             Decompose(readback, eye, roll);
-            Check(fabs(fabs(roll) - 8.0) < 0.1, "sky drawn before the camera is corrected with last frame's correction");
+            Check(fabs(fabs(roll) - 8.0) < 0.1, "sky drawn before the camera is corrected too");
             glUseProgram(terrain);
             glUniformMatrix4fv(terrainMv, 1, GL_FALSE, view);
             Swap();
 
             // Riding: the bike moves along -Z at 10 units/s with the game camera mounted on it
-            // (1.2 up, 0.3 back, looking 10 degrees down). Also drawn: scenery passing by and a
-            // spinning wheel, neither of which may be taken for the bike. After 2.5 s of level
+            // (1.2 up, 0.3 back, looking 10 degrees down) on a spring: for the first 2 s it
+            // bounces a few centimetres against the bike, like MX Simulator's camera. Also drawn:
+            // the steering fork (drawn first), scenery passing by and a spinning wheel, none of
+            // which may be taken for the bike, and the sky before the terrain. After 2.5 s of level
             // riding the bike pulls a 30 degree wheelie for 0.8 s.
-            printf("Bike tracking and pitch lock (%s camera)\n", custom ? "custom" : "game");
+            printf("Bike tracking, sky and pitch lock (%s camera)\n", custom ? "custom" : "game");
             {
                 LARGE_INTEGER freq, start, now;
                 QueryPerformanceFrequency(&freq);
                 QueryPerformanceCounter(&start);
                 float mount[16], bikeWorld[16], camWorld[16], bikeView[16], scenery[16], wheel[16], spin[16], vm[16];
-                MakeWorld({ 0, 1.2, 0.3 }, 0, -10, 0, mount);
-                double levelPitch = 0, wheeliePitch = 0, levelEyeLift = 0;
+                float fork[16], steer[16], skyView[16], skyOut[16];
+                double levelPitch = 0, wheeliePitch = 0, levelEyeLift = 0, maxYaw = 0, maxSkyDiff = 0, maxSkyShift = 0;
+                // The custom camera must ignore the game camera's 10 degree look-down. The game camera keeps it,
+                // and learns its resting pitch over a few seconds; earlier sections held it level, so stay close
+                // to level (not exactly: a perfectly level sky is an identity matrix, which is left alone).
+                const double mountPitch = custom ? -10.0 : -1.0;
                 for (;;) {
                     QueryPerformanceCounter(&now);
                     const double t = double(now.QuadPart - start.QuadPart) / freq.QuadPart;
                     if (t > 3.3) break;
+                    const double bounce = t < 2.0 ? 1.0 : 0.0;
+                    MakeWorld({ 0, 1.2 + bounce * 0.06 * sin(t * 9), 0.3 + bounce * 0.04 * sin(t * 6) }, 0, mountPitch, 0, mount);
                     const double bikePitch = t < 2.5 ? 0.0 : 30.0;
                     MakeWorld({ 0, 0.5, 100 - 10 * t }, 0, bikePitch, 0, bikeWorld);
                     Mul(bikeWorld, mount, camWorld);
                     RigidInverse(camWorld, bikeView);
+
+                    // The sky first: rotation only.
+                    for (int i = 0; i < 16; ++i)
+                        skyView[i] = (i >= 12 && i < 15) ? 0.0f : bikeView[i];
+                    glUseProgram(object);
+                    glUniformMatrix4fv(objectMv, 1, GL_FALSE, skyView);
+                    glGetUniformfv(object, objectMv, skyOut);
 
                     glUseProgram(terrain);
                     glUniformMatrix4fv(terrainMv, 1, GL_FALSE, bikeView);
@@ -441,8 +457,18 @@ int main(int argc, char** argv)
                     } else {
                         wheeliePitch = pitch;
                     }
+                    if (t > 2.0 && t < 2.5)  // forward = -back; yaw away from -Z
+                        maxYaw = fmax(maxYaw, fabs(atan2(-double(readback[2]), double(readback[10])) * 180 / 3.14159265358979));
+                    for (int c = 0; c < 3; ++c)
+                        for (int r = 0; r < 3; ++r)
+                            maxSkyDiff = fmax(maxSkyDiff, fabs(double(skyOut[c * 4 + r]) - readback[c * 4 + r]));
+                    maxSkyShift = fmax(maxSkyShift, fabs(skyOut[12]) + fabs(skyOut[13]) + fabs(skyOut[14]));
 
                     glUseProgram(object);
+                    MakeWorld({ 0, 0.9, -0.6 }, 10 * sin(t * 2), 0, 0, steer);  // the fork, steering +-10 degrees
+                    Mul(bikeWorld, steer, fork);
+                    Mul(bikeView, fork, vm);
+                    glUniformMatrix4fv(objectMv, 1, GL_FALSE, vm);
                     Mul(bikeView, bikeWorld, vm);  // the bike: View * Model
                     glUniformMatrix4fv(objectMv, 1, GL_FALSE, vm);
                     MakeWorld({ 1.5, 0.5, 100 - 4 * floor(t * 2.5) }, 20, 0, 0, scenery);  // a post every 4 units
@@ -455,15 +481,37 @@ int main(int argc, char** argv)
                     Swap();
                     Sleep(5);
                 }
-                printf("    level: view pitch %.2f deg (game camera -10), eye lifted %.3f; wheelie: %.2f deg (game camera +20)\n",
-                       levelPitch, levelEyeLift, wheeliePitch);
+                printf("    level: view pitch %.2f deg (game camera %.0f), eye lifted %.3f, yaw wobble %.2f deg; "
+                       "wheelie: %.2f deg (game camera %+.0f)\n", levelPitch, mountPitch, levelEyeLift, maxYaw,
+                       wheeliePitch, mountPitch + 30);
+                printf("    sky vs world rotation: max difference %.2g; sky shifted by %.2g\n", maxSkyDiff, maxSkyShift);
+                Check(maxSkyDiff < 1e-4, "the sky turns exactly with this frame's world (no one-frame lag)");
+                Check(maxSkyShift < 1e-6, "the sky is never moved by eye offsets");
                 if (custom) {
+                    // How often the tracker locked and lost the bike, from the DLL's log.
+                    char logPath[MAX_PATH];
+                    GetModuleFileNameA(dll, logPath, MAX_PATH);
+                    strcpy_s(strrchr(logPath, '\\') + 1, MAX_PATH - (strrchr(logPath, '\\') + 1 - logPath), "mxcam.log");
+                    int locks = 0, losses = 0;
+                    FILE* log = _fsopen(logPath, "r", _SH_DENYNO);  // the DLL still has it open for writing
+                    if (log) {
+                        char line[1024];
+                        while (fgets(line, sizeof line, log)) {
+                            locks += strstr(line, "bike: tracking") != nullptr;
+                            losses += strstr(line, "bike: lost track") != nullptr;
+                        }
+                        fclose(log);
+                    }
+                    printf("    tracker: locked %d time(s), lost %d time(s)\n", locks, losses);
+                    Check(locks == 1 && losses == 0, "the bike is found once and never lost (camera bounce tolerated)");
+                    Check(maxYaw < 0.5, "the view ignores the steering fork");
+
                     Check(fabs(levelPitch + 8.0) < 0.5, "custom camera found the bike and uses its own 8 degree look-down");
                     Check(fabs(levelEyeLift - 0.1) < 0.005, "HeadHeight lifts the eye along the bike's up axis");
                     Check(fabs(wheeliePitch - 7.0) < 1.5, "pitch lock halves the wheelie (+30 -> +15 - 8 = +7 deg)");
                 } else {
-                    Check(fabs(levelPitch + 10.0) < 0.5, "game camera untouched on flat ground (-10 deg)");
-                    Check(fabs(wheeliePitch - 5.0) < 1.5, "pitch lock halves the wheelie (+20 -> +5 deg)");
+                    Check(fabs(levelPitch - mountPitch) < 0.6, "game camera untouched on flat ground");
+                    Check(fabs(wheeliePitch - (mountPitch + 15.0)) < 1.5, "pitch lock halves the wheelie (30 degrees -> 15)");
                 }
             }
             Swap(true);

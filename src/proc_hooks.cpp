@@ -8,9 +8,11 @@
 //     - the terrain shader (the program that has Config::cameraProgramUniform, 'u_heights') is
 //       drawn with Model = identity, so its first u_modelview upload is the camera view matrix;
 //       it feeds camera::Update(), which yields the eye-space correction C;
-//     - every rigid u_modelview upload is replaced with C * M - this covers the world, the
-//       rider's own bike, and the sky (drawn before the terrain, so it reuses the previous
-//       frame's C);
+//     - every rigid u_modelview upload is replaced with C * M - this covers the world and the
+//       rider's own bike;
+//     - the sky is drawn before the terrain with a rotation-only view. That rotation is enough
+//       to work out this frame's view orientation early (camera::OrientFrame), and the sky
+//       gets only the rotation part of C, so eye offsets never move it;
 //     - uploads that aren't rigid (HUD elements are scaled down or flattened) or are exactly
 //       identity (2D screens) are left alone.
 //   Uniform names are logged as the game looks them up, and every upload goes into the F10 dump.
@@ -63,9 +65,11 @@ int     g_lookupsLogged = 0;
 GLuint  g_program = 0;                                           // program bound by glUseProgram
 
 struct ShaderCamera {
-    bool   haveCorrection    = false;  // kept into the next frame for the sky, which comes first
-    double correction[16]    = {};
+    bool   haveCorrection    = false;  // the camera was found (this frame, or last frame until it is)
+    double correction[16]    = {};     // full eye-space correction, for everything with a position
+    double rotationOnly[16]  = {};     // its rotation alone, for the sky
     bool   capturedThisFrame = false;
+    bool   orientedThisFrame = false;  // the sky already supplied this frame's camera rotation
     int    correctedThisFrame = 0;
 };
 ShaderCamera g_camera;
@@ -181,7 +185,8 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
             view[i] = value[i];
         g_camera.capturedThisFrame = true;
         bike::BeginFrame(view);
-        g_camera.haveCorrection = camera::Update(view, g_camera.correction);
+        g_camera.haveCorrection = camera::Update(view, g_camera.correction) &&
+                                  camera::RotationCorrection(g_camera.rotationOnly);
         if (g_camera.haveCorrection) {
             const camera::Telemetry& t = camera::LastTelemetry();
             DumpCall("^ CAMERA  dt=%.1fms lag=%.2fdeg roll=%.2fdeg rollCorr=%.2fdeg pitchExcess=%.1fdeg "
@@ -194,6 +199,20 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         } else {
             DumpCall("^ CAMERA rejected (not a rigid view matrix)");
         }
+    } else if (!HasTranslation(value)) {
+        // The sky: a rotation-only view, drawn before the terrain. Its rotation is this frame's
+        // raw camera rotation, which is all the orientation half of the camera pipeline needs,
+        // so the sky turns in step with this frame's world instead of last frame's. Only the
+        // rotation is applied: the sky is infinitely far away, so eye offsets (neck, head
+        // position) must not move it.
+        if (!g_camera.capturedThisFrame && !g_camera.orientedThisFrame && g_camera.haveCorrection) {
+            double view[16];
+            for (int i = 0; i < 16; ++i)
+                view[i] = value[i];
+            g_camera.orientedThisFrame = camera::OrientFrame(view) && camera::RotationCorrection(g_camera.rotationOnly);
+            if (g_camera.orientedThisFrame)
+                DumpCall("^ SKY: orientation worked out for this frame");
+        }
     } else if (g_camera.capturedThisFrame) {
         bike::Observe(program, value);  // raw View * Model: one of the candidates for the bike
     }
@@ -201,11 +220,12 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         return value;
 
     // scratch = C * value, accumulated in double precision.
+    const double* correction = HasTranslation(value) ? g_camera.correction : g_camera.rotationOnly;
     for (int c = 0; c < 4; ++c) {
         for (int r = 0; r < 4; ++r) {
             double sum = 0;
             for (int k = 0; k < 4; ++k)
-                sum += g_camera.correction[k * 4 + r] * value[c * 4 + k];
+                sum += correction[k * 4 + r] * value[c * 4 + k];
             scratch[c * 4 + r] = static_cast<GLfloat>(sum);
         }
     }
@@ -331,9 +351,12 @@ bool EndShaderFrame()
 
     // No camera this frame (menu, replay, effect off): don't carry a stale correction into the
     // next frame's sky.
-    if (!captured)
+    if (!captured) {
         g_camera.haveCorrection = false;
+        camera::AbandonFrame();
+    }
     g_camera.capturedThisFrame = false;
+    g_camera.orientedThisFrame = false;
     g_camera.correctedThisFrame = 0;
     return captured;
 }

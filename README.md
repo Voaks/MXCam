@@ -98,13 +98,16 @@ top is a fresh identity. Modelview loads in 3D passes are numbered each frame, a
 `ViewMatrixIndex` is taken as the view matrix. `glLoadIdentity()` followed by `glMultMatrix(view)`
 counts as a load.
 
-**Finding the bike (`src/bike.cpp`).** The game camera is mounted on the bike, so the camera's
-position in the bike's own model space never changes while riding. The tracker follows every
-rigid object drawn within `BikeSearchRadius` of the camera from frame to frame, and locks onto
-the one that stays fixed relative to the camera for a second while the camera travels five
-metres. Scenery and other riders slide past, wheels spin and the bars steer, so none of them
-qualify. The bike's forward and up model axes are taken as the ones nearest the camera's.
-The log says when the bike is found or lost, and the F10 dump lists every track.
+**Finding the bike (`src/bike.cpp`).** The game camera rides on the bike, sprung so that it
+bounces about 10 cm against it. The tracker follows every rigid object drawn within
+`BikeSearchRadius` of the camera from frame to frame. It locks onto the steadiest one: over a
+second, while the camera travels five metres, the camera's position in that object's space
+must stay within a few tens of centimetres, and the object's orientation relative to the camera
+must barely change. Scenery and other riders slide away by metres, wheels spin and the fork
+steers, so the bike frame wins. The lock is held through gaps of up to half a second, and the
+custom camera eases in and out instead of snapping. The bike's forward and up model axes are
+taken as the ones nearest the camera's. The log says when the bike is found or lost, and the
+F10 dump lists every track with its bounce and wobble.
 
 **Rewriting the view (`src/camera.cpp`).** The raw view is split into a head orientation
 (quaternion) and an eye position. The physics produces a new view, and the code computes an
@@ -185,8 +188,10 @@ restores every piece of GL state it touches, and costs nothing while it's closed
   `src/proc_hooks.cpp` wraps `glUniformMatrix4fv` through `wglGetProcAddress`. It takes the camera
   from the terrain program (the one with a `u_heights` uniform, which is drawn with the bare view
   matrix) and corrects every rigid `u_modelview` upload. Scaled uploads (HUD) and identity uploads
-  (2D screens) are left alone. The sky is drawn before the terrain, so it reuses the previous
-  frame's correction.
+  (2D screens) are left alone. The sky is drawn before the terrain with a rotation-only view.
+  That rotation is all the orientation half of the pipeline needs, so the view's orientation is
+  worked out at the sky and the sky turns in step with the world in the same frame. The sky
+  gets only the rotation part of the correction, so the neck and head offsets never move it.
 - **Cameras built from `glRotate` / `glTranslate` / `gluLookAt`.** The camera is only detected
   through a load, or a multiply onto identity. With `gluLookAt` the rotation is still smoothed
   and leveled, but the position-based neck physics sees no movement.

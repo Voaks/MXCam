@@ -2,11 +2,18 @@
 //   Per frame:
 //     1. BeginFrame  - the camera's world position, for measuring how far the camera travels
 //     2. Observe     - every rigid object drawn within BikeSearchRadius of the camera becomes a
-//                      candidate; its key is q = the camera's position in the object's own space
-//     3. EndFrame    - each track takes the candidate whose q is closest to its own; unmatched
-//                      candidates start new tracks, tracks unseen for a while are dropped.
-//                      A track that kept a steady q for a second while the camera travelled
-//                      several metres is rigidly attached to the camera: the rider's bike.
+//                      candidate, described relative to the camera: q = the camera's position in
+//                      the object's own space, plus the camera's forward / up in that space
+//     3. EndFrame    - each track takes the candidate closest to what it was last frame;
+//                      unmatched candidates start new tracks, tracks unseen for a while are dropped.
+//
+//   The game's first-person camera rides on the bike but is sprung: in MX Simulator it moves
+//   ~10 cm against the bike over bumps. So instead of demanding a perfectly fixed q, a track
+//   qualifies as the bike when, over about a second of travel,
+//     - q stays within a few tens of centimetres of its average (scenery slides away by metres),
+//     - its orientation relative to the camera stays steady (wheels spin, the fork steers).
+//   The steadiest qualifying track wins, and the lock is held through short gaps so the view
+//   never flips back and forth between the custom and the game camera.
 
 #include <windows.h>
 #include <cmath>
@@ -24,10 +31,10 @@ namespace {
 
 constexpr size_t kMaxCandidates = 64;
 constexpr size_t kMaxTracks     = 64;
-constexpr int    kMaxMisses     = 30;    // frames a track survives without a match
-constexpr int    kMaxStaleLock  = 3;     // frames the lock survives without a match
+constexpr double kMaxMissTime   = 0.5;   // seconds a track (and the lock) survives without a match
 constexpr double kMinAlive      = 1.0;   // seconds a track must persist before it can be locked
 constexpr double kMinTravel     = 5.0;   // ...while the camera travels this far
+constexpr double kMaxAngleSpreadDeg = 8.0;
 constexpr int    kMaxLogLines   = 60;
 
 struct Candidate {
@@ -42,14 +49,14 @@ struct Candidate {
 
 struct Track {
     int      id;
-    Vec3     q;
-    double   errorSq;      // low-passed squared deviation of q (rigidly attached: ~0)
-    double   alive;        // seconds matched without a long gap
-    double   travel;       // camera travel while this track was alive
-    int      misses;
+    Vec3     lastQ, lastFwd, lastUp;   // last frame's match
+    Vec3     meanQ, meanFwd, meanUp;   // ~1 s running averages
+    double   qVar;                     // running mean of |q - meanQ|^2
+    double   angleVar;                 // running mean of (angle to the mean orientation)^2, degrees^2
+    double   alive;                    // seconds tracked
+    double   travel;                   // camera travel while tracked
+    double   missTime;                 // seconds since the last match
     double   viewModel[16];
-    Vec3     cameraFwd;    // low-passed, used to work out the model's forward / up axes
-    Vec3     cameraUp;
     unsigned program;
     int      order;
 };
@@ -78,12 +85,27 @@ double SecondsSinceLastFrame()
     return seconds;
 }
 
-double Rms(const Track& t) { return std::sqrt(t.errorSq); }
+double AngleDeg(Vec3 a, Vec3 b)
+{
+    return std::acos(Clamp(Dot(Normalize(a), Normalize(b)), -1.0, 1.0)) * kRadToDeg;
+}
+
+// Angle between two relative orientations, each given by the camera's forward / up.
+double OrientationDiffDeg(Vec3 fwdA, Vec3 upA, Vec3 fwdB, Vec3 upB)
+{
+    return std::fmax(AngleDeg(fwdA, fwdB), AngleDeg(upA, upB));
+}
+
+double QSpread(const Track& t) { return std::sqrt(t.qVar); }
+double AngleSpread(const Track& t) { return std::sqrt(t.angleVar); }
+
+// Lower is steadier. 10 cm of bounce counts like 1 degree of wobble.
+double Score(const Track& t) { return AngleSpread(t) + 10.0 * QSpread(t); }
 
 bool Qualifies(const Track& t)
 {
-    return t.misses == 0 && t.alive >= kMinAlive && t.travel >= kMinTravel &&
-           Rms(t) < 0.05 + 0.02 * Length(t.q);
+    return t.missTime == 0 && t.alive >= kMinAlive && t.travel >= kMinTravel &&
+           QSpread(t) < 0.3 + 0.05 * Length(t.meanQ) && AngleSpread(t) < kMaxAngleSpreadDeg;
 }
 
 // The signed unit axis (+-X, +-Y, +-Z) closest to v, skipping axis `exclude`.
@@ -124,20 +146,21 @@ void Lock(const Track& t)
     // The game's camera looks roughly along the bike, so the model axes nearest to the camera's
     // average forward / up are the bike's forward / up.
     int forwardAxis, upAxis;
-    const Vec3 forward = SnapToAxis(t.cameraFwd, -1, forwardAxis);
-    const Vec3 up      = SnapToAxis(t.cameraUp, forwardAxis, upAxis);
+    const Vec3 forward = SnapToAxis(t.meanFwd, -1, forwardAxis);
+    const Vec3 up      = SnapToAxis(t.meanUp, forwardAxis, upAxis);
     g_pose.forward[0] = forward.x; g_pose.forward[1] = forward.y; g_pose.forward[2] = forward.z;
     g_pose.up[0] = up.x;           g_pose.up[1] = up.y;           g_pose.up[2] = up.z;
     if (g_logLines++ < kMaxLogLines)
-        Log("bike: tracking an object of program %u (draw #%d): the camera sits at (%.3f, %.3f, %.3f) in its space, "
-            "jitter %.1f mm; forward axis %s, up axis %s",
-            t.program, t.order, t.q.x, t.q.y, t.q.z, Rms(t) * 1000.0, AxisName(forward), AxisName(up));
+        Log("bike: tracking an object of program %u (draw #%d): the camera sits at (%.2f, %.2f, %.2f) in its space, "
+            "bounce %.0f mm, wobble %.1f deg; forward axis %s, up axis %s",
+            t.program, t.order, t.meanQ.x, t.meanQ.y, t.meanQ.z, QSpread(t) * 1000.0, AngleSpread(t),
+            AxisName(forward), AxisName(up));
 }
 
 void Unlock(const char* why)
 {
     if (g_lockedId && g_logLines++ < kMaxLogLines)
-        Log("bike: lost track (%s); custom camera falls back to the game camera until it is found again", why);
+        Log("bike: lost track (%s); the custom camera eases back to the game camera until it is found again", why);
     g_lockedId = 0;
     g_pose.tracked = false;
 }
@@ -230,41 +253,52 @@ void EndFrame()
         }
     }
 
-    const double qAlpha   = 1.0 - std::exp(-2.0 * dt);
-    const double errAlpha = 1.0 - std::exp(-3.0 * dt);
+    const double alpha = 1.0 - std::exp(-1.0 * dt);  // ~1 s averages
     for (Track* t : order) {
         Candidate* best = nullptr;
-        double bestDistance = 0.10 + 0.04 * Length(t->q);  // match tolerance
+        double bestCost = 1e30;
         for (Candidate& c : g_candidates) {
-            const double d = Length(c.q - t->q);
-            if (!c.used && d < bestDistance) {
+            if (c.used)
+                continue;
+            const double dq    = Length(c.q - t->lastQ);
+            const double angle = OrientationDiffDeg(c.cameraFwd, c.cameraUp, t->lastFwd, t->lastUp);
+            if (dq > 0.4 + 0.05 * Length(t->lastQ) || angle > 25.0)
+                continue;
+            const double cost = dq + 0.02 * angle;
+            if (cost < bestCost) {
                 best = &c;
-                bestDistance = d;
+                bestCost = cost;
             }
         }
         if (!best) {
-            ++t->misses;
+            t->missTime += dt;
             continue;
         }
         best->used = true;
-        t->errorSq += (bestDistance * bestDistance - t->errorSq) * errAlpha;
-        t->q         = t->q + (best->q - t->q) * qAlpha;
-        t->cameraFwd = t->cameraFwd + (best->cameraFwd - t->cameraFwd) * qAlpha;
-        t->cameraUp  = t->cameraUp + (best->cameraUp - t->cameraUp) * qAlpha;
-        t->alive  += dt;
-        t->travel += travelStep;
-        t->misses  = 0;
-        t->program = best->program;
-        t->order   = best->order;
+        t->lastQ   = best->q;
+        t->lastFwd = best->cameraFwd;
+        t->lastUp  = best->cameraUp;
+        t->meanQ   = t->meanQ + (best->q - t->meanQ) * alpha;
+        t->meanFwd = Normalize(t->meanFwd + (best->cameraFwd - t->meanFwd) * alpha);
+        t->meanUp  = Normalize(t->meanUp + (best->cameraUp - t->meanUp) * alpha);
+        const Vec3 dq = best->q - t->meanQ;
+        t->qVar += (Dot(dq, dq) - t->qVar) * alpha;
+        const double angle = OrientationDiffDeg(best->cameraFwd, best->cameraUp, t->meanFwd, t->meanUp);
+        t->angleVar += (angle * angle - t->angleVar) * alpha;
+        t->alive   += dt;
+        t->travel  += travelStep;
+        t->missTime = 0;
+        t->program  = best->program;
+        t->order    = best->order;
         for (int i = 0; i < 16; ++i)
             t->viewModel[i] = best->viewModel[i];
     }
 
     // ---- Drop stale tracks, start new ones ----
     for (size_t i = 0; i < g_tracks.size();) {
-        if (g_tracks[i].misses > kMaxMisses) {
+        if (g_tracks[i].missTime > kMaxMissTime) {
             if (g_tracks[i].id == g_lockedId)
-                Unlock("the bike stopped matching");
+                Unlock("the bike was not seen for half a second");
             g_tracks.erase(g_tracks.begin() + static_cast<std::ptrdiff_t>(i));
         } else {
             ++i;
@@ -274,37 +308,35 @@ void EndFrame()
         if (c.used || g_tracks.size() >= kMaxTracks)
             continue;
         Track t{};
-        t.id        = g_nextId++;
-        t.q         = c.q;
-        t.errorSq   = 0.05 * 0.05;  // unproven until it has a history
-        t.cameraFwd = c.cameraFwd;
-        t.cameraUp  = c.cameraUp;
-        t.program   = c.program;
-        t.order     = c.order;
+        t.id       = g_nextId++;
+        t.lastQ    = t.meanQ = c.q;
+        t.lastFwd  = t.meanFwd = c.cameraFwd;
+        t.lastUp   = t.meanUp = c.cameraUp;
+        t.qVar     = 0.3 * 0.3;   // unproven until it has a history
+        t.angleVar = 10.0 * 10.0;
+        t.program  = c.program;
+        t.order    = c.order;
         for (int i = 0; i < 16; ++i)
             t.viewModel[i] = c.viewModel[i];
         g_tracks.push_back(t);
     }
 
-    // ---- Lock onto the steadiest qualified track ----
+    // ---- Lock onto the steadiest qualified track, and hold on to it ----
     Track* locked = g_lockedId ? FindTrack(g_lockedId) : nullptr;
-    if (locked && locked->misses > kMaxStaleLock) {
-        Unlock("the bike was not drawn for several frames");
-        locked = nullptr;
-    }
     Track* best = nullptr;
     for (Track& t : g_tracks) {
-        if (Qualifies(t) && (!best || Rms(t) < Rms(*best) - 1e-6 || (Rms(t) <= Rms(*best) + 1e-6 && t.order < best->order)))
+        if (Qualifies(t) && (!best || Score(t) < Score(*best)))
             best = &t;
     }
     if (!locked && best) {
         Lock(*best);
         locked = best;
-    } else if (locked && best && best != locked && best->alive > 2.0 && Rms(*best) < 0.5 * Rms(*locked) - 0.002) {
-        Lock(*best);  // a clearly steadier object (e.g. the frame rather than the steering bars)
+    } else if (locked && best && best != locked && best->alive > 2.0 && Score(*best) < 0.5 * Score(*locked) - 0.5) {
+        Lock(*best);  // a clearly steadier object (e.g. the frame rather than the steering fork)
         locked = best;
     }
-    if (locked && locked->misses == 0) {
+    if (locked) {
+        // During a short gap the last match is kept: the bike barely moves against the camera.
         for (int i = 0; i < 16; ++i)
             g_pose.cameraSpace[i] = locked->viewModel[i];
         g_pose.tracked = true;
@@ -318,9 +350,10 @@ void EndFrame()
         for (const Track& t : g_tracks) {
             if (shown++ >= 16)
                 break;
-            Log("    track %d%s: program %u draw #%d, camera at (%.3f, %.3f, %.3f), jitter %.1f mm, "
-                "alive %.1f s, travel %.1f, misses %d", t.id, t.id == g_lockedId ? " [BIKE]" : "",
-                t.program, t.order, t.q.x, t.q.y, t.q.z, Rms(t) * 1000.0, t.alive, t.travel, t.misses);
+            Log("    track %d%s: program %u draw #%d, camera at (%.2f, %.2f, %.2f), bounce %.0f mm, wobble %.1f deg, "
+                "alive %.1f s, travel %.1f%s", t.id, t.id == g_lockedId ? " [BIKE]" : "", t.program, t.order,
+                t.meanQ.x, t.meanQ.y, t.meanQ.z, QSpread(t) * 1000.0, AngleSpread(t), t.alive, t.travel,
+                t.missTime > 0 ? " (missing)" : "");
         }
     }
 }
@@ -331,7 +364,7 @@ const char* StatusText()
 {
     if (g_pose.tracked)
         return "BIKE FOUND";
-    return g_tracks.empty() ? "NO BIKE IN VIEW" : "LOOKING FOR THE BIKE - RIDE A FEW METRES";
+    return g_tracks.empty() ? "NO BIKE IN VIEW" : "LOOKING FOR THE BIKE";
 }
 
 }  // namespace bike

@@ -1,9 +1,11 @@
 // camera.cpp
-//   Per-frame pipeline (all filters are frame-rate independent):
+//   Per-frame pipeline (all filters are frame-rate independent), in two phases:
+//   OrientFrame - everything about where the view points. It only needs the raw camera rotation,
+//                 so it can run as early as the sky, which is drawn before the camera position
+//                 is known.
 //     1. timing          - QueryPerformanceCounter delta since the last update
-//     2. decompose       - raw view matrix -> head orientation (quaternion) + eye position
-//     3. cut detection   - respawns / camera switches / look-back snaps reset every filter
-//     4. motion          - filtered velocity and acceleration of the eye; airborne detection
+//     2. decompose       - raw view matrix -> head orientation (quaternion)
+//     3. cut detection   - camera switches / look-back snaps reset every filter
 //     5. attitude        - heading / pitch / roll of the game camera and, when the tracker has
 //                          found it, of the rider's bike (bike.cpp)
 //     6. target view     - game camera:   the game's view with pitch lock and horizon lock
@@ -12,7 +14,9 @@
 //                                         locks, our own look-down angle and the game's
 //                                         look-left / right / back passed through;
 //                          both: whip centering while airborne, head position offsets
-//     7. smoothing       - exponential slerp toward the target, with a lag limit
+//     7. smoothing       - exponential slerp toward the target, with a lag limit; head nod
+//   FinishFrame - where the eye is.
+//     4. motion          - filtered velocity and acceleration of the eye; airborne detection
 //     8. neck physics    - vertical low-pass + spring-damper driven by vertical acceleration
 //     9. rebuild         - new view matrix, and correction C = NewView * inverse(RawView)
 
@@ -79,6 +83,7 @@ private:
 struct State {
     bool   valid        = false;  // false: the next Update() seeds every filter from the raw camera
     bool   haveVelocity = false;
+    bool   havePos      = false;  // false: FinishFrame() seeds the position filters
     Quat   smoothRot;             // low-passed view orientation
     Quat   prevRawRot;
     Vec3   prevPos;
@@ -102,6 +107,8 @@ RestEstimator g_bikePitchRest;    // bike model pitch on flat ground
 RestEstimator g_gameAngleRest;    // game camera pitch relative to the bike: the game's 1st-person angle
 Vec3          g_lastHeading{ 0, 0, -1 };
 double        g_customWeight = 0; // 0 = game camera .. 1 = custom camera, eased on switches
+bike::Pose    g_lastPose;         // last pose the tracker reported, used while easing out
+bool          g_haveLastPose = false;
 
 double SecondsSinceLastUpdate()
 {
@@ -214,16 +221,59 @@ double LockedRoll(const Attitude& a, double lock, const Config& cfg)
     return a.roll + Clamp(-a.roll * lock * fade, -maxCorr, maxCorr);
 }
 
+// Camera axes (unit, right-handed) and uniform scale of a view matrix; false if it isn't rigid.
+bool DecomposeView(const double view[16], Vec3& right, Vec3& up, Vec3& back, double& scale)
+{
+    // A view matrix is [ s*R | t ] with bottom row 0,0,0,1. The rows of R are the camera's
+    // right / up / back axes expressed in world space; the camera looks down -back.
+    if (std::fabs(view[3]) > 1e-4 || std::fabs(view[7]) > 1e-4 || std::fabs(view[11]) > 1e-4 ||
+        std::fabs(view[15] - 1.0) > 1e-4)
+        return false;
+    right = { view[0], view[4], view[8] };
+    up    = { view[1], view[5], view[9] };
+    back  = { view[2], view[6], view[10] };
+    scale = Length(right);  // engines sometimes bake a uniform world scale in
+    if (scale < 1e-9 || std::fabs(Length(up) / scale - 1.0) > 0.01 || std::fabs(Length(back) / scale - 1.0) > 0.01)
+        return false;  // non-uniform scale: not a camera
+    right = right / scale;
+    up    = up / scale;
+    back  = back / scale;
+    if (Dot(Cross(right, up), back) < 0.9)
+        return false;  // mirrored or sheared: e.g. a reflection pass
+    // Re-orthonormalise to remove float drift before converting to a quaternion.
+    back  = Normalize(back);
+    right = Normalize(Cross(up, back));
+    up    = Cross(back, right);
+    return true;
+}
+
+// Carried from OrientFrame() to FinishFrame() within one frame.
+struct Frame {
+    bool   oriented = false;            // OrientFrame() ran and FinishFrame() has not yet
+    bool   haveRotation = false;        // rot / raw axes hold a valid orientation (for RotationCorrection)
+    double dt       = 0;
+    bool   reset    = false;
+    Vec3   rawRight, rawUp, rawBack;    // raw camera axes the orientation was computed from
+    Quat   rot;                         // final view orientation
+    Vec3   offsetFwd, offsetUp;         // head offset axes and amounts
+    double forwardOffset = 0, heightOffset = 0;
+};
+Frame g_frame;
+
 }  // namespace
 
 void Reset() { g_state.valid = false; }
 
 const Telemetry& LastTelemetry() { return g_telemetry; }
 
-bool Update(const double view[16], double correction[16])
+void AbandonFrame() { g_frame.oriented = false; }
+
+bool OrientFrame(const double view[16])
 {
     const Config& cfg = GetConfig();
     const Vec3 worldUp{ cfg.worldUp[0], cfg.worldUp[1], cfg.worldUp[2] };
+    g_frame.oriented = false;
+    g_frame.haveRotation = false;
 
     // ---- 1. Timing --------------------------------------------------------------------
     double dt = SecondsSinceLastUpdate();
@@ -232,54 +282,243 @@ bool Update(const double view[16], double correction[16])
     dt = Clamp(dt, 0.0, 0.05);
 
     // ---- 2. Decompose the raw view matrix ---------------------------------------------
-    // A view matrix is [ s*R | t ] with bottom row 0,0,0,1. The rows of R are the camera's
-    // right / up / back axes expressed in world space; the camera looks down -back.
-    if (std::fabs(view[3]) > 1e-4 || std::fabs(view[7]) > 1e-4 || std::fabs(view[11]) > 1e-4 ||
-        std::fabs(view[15] - 1.0) > 1e-4)
+    Vec3 right, up, back;
+    double scale;
+    if (!DecomposeView(view, right, up, back, scale))
         return false;
-
-    Vec3 right{ view[0], view[4], view[8] };
-    Vec3 up   { view[1], view[5], view[9] };
-    Vec3 back { view[2], view[6], view[10] };
-    const double scale = Length(right);  // engines sometimes bake a uniform world scale in
-    if (scale < 1e-9 || std::fabs(Length(up) / scale - 1.0) > 0.01 || std::fabs(Length(back) / scale - 1.0) > 0.01)
-        return false;  // non-uniform scale: not a camera
-    right = right / scale;
-    up    = up / scale;
-    back  = back / scale;
-    if (Dot(Cross(right, up), back) < 0.9)
-        return false;  // mirrored or sheared: e.g. a reflection pass
-
-    // Re-orthonormalise to remove float drift before converting to a quaternion.
-    back  = Normalize(back);
-    right = Normalize(Cross(up, back));
-    up    = Cross(back, right);
-
-    const Vec3 t{ view[12], view[13], view[14] };
-    const Vec3 rawPos = -(right * t.x + up * t.y + back * t.z) / scale;  // eye = -R^T t / s
     const Quat rawRot = QuatFromBasis(right, up, back);
     const Vec3 rawFwd = -back;
 
-    // ---- 3. Camera cut detection ------------------------------------------------------
+    // ---- 3. Camera cut detection (rotation; position jumps are handled in FinishFrame) ----
     // Compared raw to raw: the corrected view may sit tens of degrees from the raw one.
     if (g_state.valid) {
-        const double jumpDeg  = AngleBetween(g_state.prevRawRot, rawRot) * kRadToDeg;
-        const double jumpDist = Length(rawPos - g_state.prevPos);
-        if (jumpDeg > cfg.snapAngleDeg || jumpDist > cfg.teleportDistance) {
+        const double jumpDeg = AngleBetween(g_state.prevRawRot, rawRot) * kRadToDeg;
+        if (jumpDeg > cfg.snapAngleDeg) {
             if (g_cutsLogged++ < 20)
-                Log("camera: cut detected (%.1f deg, %.2f units), resetting filters", jumpDeg, jumpDist);
+                Log("camera: cut detected (%.1f deg turn), resetting filters", jumpDeg);
             g_state.valid = false;
         }
     }
     const bool reset = !g_state.valid;
     if (reset) {
         g_state = State{};
-        g_state.valid        = true;
+        g_state.valid = true;
+        dt = 0;
+    }
+    g_state.prevRawRot = rawRot;
+
+    // Motion state is updated in FinishFrame, so these are one frame old: fine for slow signals.
+    const double verticalAccel = Dot(g_state.accel, worldUp);
+    const bool   onGround      = g_state.airborne < 0.3;
+
+    // ---- 5. Attitude of the game camera and of the bike -----------------------------------
+    const Attitude cameraAtt = Measure(rawFwd, up, worldUp);
+    if (onGround && cameraAtt.level > 0.5)
+        g_cameraPitchRest.Add(cameraAtt.pitch * kRadToDeg, dt);
+
+    // The custom camera eases in when the bike is found and out when it is lost; while easing
+    // out it keeps using the last known bike pose (the bike barely moves against the camera).
+    const bike::Pose& pose = bike::Current();
+    if (pose.tracked) {
+        g_lastPose = pose;
+        g_haveLastPose = true;
+    }
+    g_customWeight += (((cfg.customCamera && pose.tracked) ? 1.0 : 0.0) - g_customWeight) * LowPassAlpha(3.0, dt);
+    if (!g_haveLastPose)
+        g_customWeight = 0;
+
+    bool     haveBike = false;
+    Vec3     bikeFwd, bikeUp;
+    Attitude bikeAtt;
+    double   lookYaw = 0;
+    if (g_haveLastPose && (pose.tracked || g_customWeight > 1e-3)) {
+        // The bike's axes in camera space (its model axes through View * Model), then in world
+        // space through the camera axes.
+        const double* m = g_lastPose.cameraSpace;
+        const auto ToCamera = [m](const double a[3]) {
+            return Vec3{ m[0] * a[0] + m[4] * a[1] + m[8] * a[2],
+                         m[1] * a[0] + m[5] * a[1] + m[9] * a[2],
+                         m[2] * a[0] + m[6] * a[1] + m[10] * a[2] };
+        };
+        const auto ToWorld = [&](Vec3 v) { return right * v.x + up * v.y + back * v.z; };
+        bikeFwd = Normalize(ToWorld(ToCamera(g_lastPose.forward)));
+        const Vec3 u = ToWorld(ToCamera(g_lastPose.up));
+        bikeUp = Normalize(u - bikeFwd * Dot(u, bikeFwd));
+        haveBike = Length(Cross(bikeFwd, bikeUp)) > 0.5;
+    }
+    if (haveBike) {
+        bikeAtt = Measure(bikeFwd, bikeUp, worldUp);
+        if (onGround && bikeAtt.level > 0.5 && pose.tracked)
+            g_bikePitchRest.Add(bikeAtt.pitch * kRadToDeg, dt);
+
+        // Where the game camera points relative to the bike: its look-down angle, and the
+        // look-left / right / back keys.
+        const Vec3 bikeRight = Cross(bikeFwd, bikeUp);
+        const double x = Dot(rawFwd, bikeRight), y = Dot(rawFwd, bikeUp), z = Dot(rawFwd, bikeFwd);
+        lookYaw = std::atan2(x, z);
+        if (std::fabs(lookYaw) < 20.0 * kDegToRad && pose.tracked)
+            g_gameAngleRest.Add(std::atan2(y, std::sqrt(x * x + z * z)) * kRadToDeg, dt);
+    } else {
+        g_customWeight = 0;
+    }
+    const double absYawDeg = std::fabs(lookYaw) * kRadToDeg;
+
+    // Pitch lock works on the pitch *away from rest*, so riding on flat ground looks the same
+    // at any setting and only wheelies, stoppies and jump faces are evened out.
+    const double cameraPitchExcess = cameraAtt.pitch - g_cameraPitchRest.Degrees() * kDegToRad;
+    const double bikePitchExcess   = haveBike ? bikeAtt.pitch - g_bikePitchRest.Degrees() * kDegToRad : 0.0;
+
+    // ---- 6. Target view -------------------------------------------------------------------
+    // Whip centering: while airborne, turn the view from the bike's nose toward the direction of
+    // travel. Inside WhipFreeAngle the view stays on the travel direction; past it the view
+    // follows the extra swing. WhipFollow blends back toward the nose.
+    const auto WhipCorrection = [&](Vec3 nose) {
+        Vec3 travel = g_state.velocity - worldUp * Dot(g_state.velocity, worldUp);
+        const double speed = Length(travel);
+        if (!cfg.whipCentering || speed < 1e-3)
+            return 0.0;
+        travel = travel / speed;
+        const double w       = std::atan2(Dot(nose, Normalize(Cross(travel, worldUp))), Dot(nose, travel));
+        const double free    = cfg.whipFreeAngleDeg * kDegToRad;
+        const double excess  = w > 0 ? std::fmax(0.0, w - free) : std::fmin(0.0, w + free);
+        const double wanted  = excess + cfg.whipFollow * (w - excess);
+        // Only in the air, at speed, and never for a sideways look or a bike going backwards.
+        const double weight  = g_state.airborne * SmoothStep(3.0, 6.0, speed) *
+                               (1.0 - SmoothStep(60.0 * kDegToRad, 80.0 * kDegToRad, std::fabs(w)));
+        return (wanted - w) * weight;
+    };
+
+    // Game camera: the game's view with the locks applied. (It is fixed to the bike, so its
+    // own pitch away from rest is the bike's.)
+    double whip = WhipCorrection(cameraAtt.heading);
+    const double gamePitch = cameraAtt.pitch - cfg.pitchLock * cameraPitchExcess;
+    const double gameRoll  = LockedRoll(cameraAtt, cfg.horizonLock, cfg);
+    Quat target = Build(Turn(cameraAtt.heading, whip, worldUp), gamePitch, gameRoll, worldUp);
+
+    // Custom camera: built from the bike only.
+    if (g_customWeight > 1e-3) {
+        const double angleDown = cfg.keepGameAngle ? -g_gameAngleRest.Degrees() : cfg.cameraAngleDeg;
+        const double pitch = (1.0 - cfg.pitchLock) * bikePitchExcess - angleDown * kDegToRad;
+        const double roll  = LockedRoll(bikeAtt, cfg.horizonLock, cfg);
+        // The game's look keys turn the camera 90 / 180 degrees; small offsets (the game's own
+        // whip or gimbal) are ignored.
+        const double look = lookYaw * SmoothStep(20.0, 45.0, absYawDeg);
+        const double customWhip = WhipCorrection(bikeAtt.heading);
+        const Quat custom = Build(Turn(bikeAtt.heading, customWhip, worldUp), pitch, roll, worldUp, look);
+        target = Slerp(target, custom, g_customWeight);
+        whip += (customWhip - whip) * g_customWeight;
+    }
+    g_lastHeading = cameraAtt.heading;
+
+    // Head position: along the bike (custom) or the game camera's own axes.
+    const double lookAlpha = LowPassAlpha(10.0, dt);
+    const double sideTarget = haveBike ? SmoothStep(30.0, 70.0, absYawDeg) * (1.0 - SmoothStep(110.0, 150.0, absYawDeg)) : 0.0;
+    const double backTarget = haveBike ? SmoothStep(110.0, 150.0, absYawDeg) : 0.0;
+    g_state.lookSide += (sideTarget - g_state.lookSide) * (reset ? 1.0 : lookAlpha);
+    g_state.lookBack += (backTarget - g_state.lookBack) * (reset ? 1.0 : lookAlpha);
+    const double side = g_state.lookSide * g_customWeight, rear = g_state.lookBack * g_customWeight;
+    g_frame.forwardOffset = cfg.headForward + side * cfg.lookSideForward + rear * cfg.lookBackForward;
+    g_frame.heightOffset  = cfg.headHeight + side * cfg.lookSideHeight + rear * cfg.lookBackHeight;
+    g_frame.offsetFwd = rawFwd;
+    g_frame.offsetUp  = up;
+    if (haveBike) {
+        g_frame.offsetFwd = g_frame.offsetFwd + (bikeFwd - g_frame.offsetFwd) * g_customWeight;
+        g_frame.offsetUp  = g_frame.offsetUp + (bikeUp - g_frame.offsetUp) * g_customWeight;
+    }
+
+    // ---- 7. Inertial smoothing (pitch / yaw / roll) ---------------------------------------
+    // Exponential slerp toward the target, filtering out high-frequency spikes. MaxLagDeg caps
+    // how far behind the view can fall during sustained fast motion.
+    Quat& smooth = g_state.smoothRot;
+    if (reset)
+        smooth = target;
+    smooth = Slerp(smooth, target, LowPassAlpha(cfg.rotationResponse, dt));
+    const double lag    = AngleBetween(smooth, target);
+    const double maxLag = cfg.maxLagDeg * kDegToRad;
+    if (lag > maxLag)
+        smooth = Slerp(target, smooth, maxLag / lag);
+    Quat rot = smooth;
+
+    // Neck compression also nods the head forward a little (rotation about the camera's right
+    // axis; a negative angle pitches down). Uses last frame's neck, so the orientation is
+    // complete here - the sky, drawn before the camera position is known, gets all of it.
+    if (cfg.nodDegPerMeter != 0) {
+        const Vec3 pitchAxis = Rotate(rot, { 1, 0, 0 });
+        rot = AxisAngle(pitchAxis, g_state.neckOffset * cfg.nodDegPerMeter * kDegToRad) * rot;
+    }
+
+    g_frame.rot      = Normalize(rot);
+    g_frame.dt       = dt;
+    g_frame.reset    = reset;
+    g_frame.rawRight = right;
+    g_frame.rawUp    = up;
+    g_frame.rawBack  = back;
+    g_frame.oriented = true;
+    g_frame.haveRotation = true;
+
+    const Vec3 B = Rotate(g_frame.rot, { 0, 0, 1 });
+    const Attitude finalAtt = Measure(-B, Rotate(g_frame.rot, { 0, 1, 0 }), worldUp);
+    g_telemetry.dtMs              = dt * 1000.0;
+    g_telemetry.lagDeg            = AngleBetween(g_state.smoothRot, target) * kRadToDeg;
+    g_telemetry.rawRollDeg        = (haveBike ? bikeAtt.roll : cameraAtt.roll) * kRadToDeg;
+    g_telemetry.rollCorrectionDeg = (finalAtt.roll - cameraAtt.roll) * kRadToDeg;
+    g_telemetry.pitchExcessDeg    = (g_customWeight > 0.5 ? bikePitchExcess : cameraPitchExcess) * kRadToDeg;
+    g_telemetry.viewPitchDeg      = finalAtt.pitch * kRadToDeg;
+    g_telemetry.lookYawDeg        = lookYaw * kRadToDeg;
+    g_telemetry.whipDeg           = whip * kRadToDeg;
+    g_telemetry.airborne          = g_state.airborne;
+    g_telemetry.bikeTracked       = pose.tracked;
+    g_telemetry.customActive      = g_customWeight > 0.5;
+    g_telemetry.verticalAccelG    = verticalAccel / kGravity;
+    return true;
+}
+
+bool RotationCorrection(double out[16])
+{
+    if (!g_frame.haveRotation)
+        return false;
+    // C = NewRotation * RawRotation^T; element (r, c) = dot(new axis r, raw axis c).
+    const Vec3 newAxes[3] = { Rotate(g_frame.rot, { 1, 0, 0 }), Rotate(g_frame.rot, { 0, 1, 0 }),
+                              Rotate(g_frame.rot, { 0, 0, 1 }) };
+    const Vec3 rawAxes[3] = { g_frame.rawRight, g_frame.rawUp, g_frame.rawBack };
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r)
+            out[c * 4 + r] = (r < 3 && c < 3) ? Dot(newAxes[r], rawAxes[c]) : (r == c ? 1.0 : 0.0);
+    }
+    return true;
+}
+
+bool FinishFrame(const double view[16], double correction[16])
+{
+    const Config& cfg = GetConfig();
+    const Vec3 worldUp{ cfg.worldUp[0], cfg.worldUp[1], cfg.worldUp[2] };
+    if (!g_frame.oriented)
+        return false;
+    g_frame.oriented = false;
+
+    Vec3 right, up, back;
+    double scale;
+    if (!DecomposeView(view, right, up, back, scale))
+        return false;
+    const Vec3 t{ view[12], view[13], view[14] };
+    const Vec3 rawPos = -(right * t.x + up * t.y + back * t.z) / scale;  // eye = -R^T t / s
+    double dt = g_frame.dt;
+
+    // A position jump (respawn) restarts the position filters only.
+    if (g_state.havePos && Length(rawPos - g_state.prevPos) > cfg.teleportDistance) {
+        if (g_cutsLogged++ < 20)
+            Log("camera: cut detected (%.2f units), resetting the position filters", Length(rawPos - g_state.prevPos));
+        g_state.havePos = false;
+    }
+    if (!g_state.havePos) {
+        g_state.havePos      = true;
+        g_state.haveVelocity = false;
+        g_state.velocity = g_state.accel = Vec3{};
+        g_state.neckOffset = g_state.neckVelocity = 0;
         g_state.prevPos      = rawPos;
         g_state.smoothHeight = Dot(rawPos, worldUp);
         dt = 0;
     }
-    g_state.prevRawRot = rawRot;
 
     // ---- 4. Motion: velocity, acceleration, airborne ------------------------------------
     if (dt > 1e-5) {
@@ -305,125 +544,6 @@ bool Update(const double view[16], double correction[16])
     // In the air the eye is in free fall (-1 g); on the ground it hovers around 0 g.
     g_state.airborne += ((verticalAccel < -0.6 * kGravity ? 1.0 : 0.0) - g_state.airborne) * LowPassAlpha(6.0, dt);
 
-    // ---- 5. Attitude of the game camera and of the bike -----------------------------------
-    const Attitude cameraAtt = Measure(rawFwd, up, worldUp);
-    const bool onGround = g_state.airborne < 0.3;
-    if (onGround && cameraAtt.level > 0.5)
-        g_cameraPitchRest.Add(cameraAtt.pitch * kRadToDeg, dt);
-
-    const bike::Pose& pose = bike::Current();
-    bool     haveBike = false;
-    Vec3     bikeFwd, bikeUp;
-    Attitude bikeAtt;
-    double   lookYaw = 0;
-    if (pose.tracked) {
-        // The bike's axes in camera space (its model axes through View * Model), then in world
-        // space through the camera axes.
-        const double* m = pose.cameraSpace;
-        const auto ToCamera = [m](const double a[3]) {
-            return Vec3{ m[0] * a[0] + m[4] * a[1] + m[8] * a[2],
-                         m[1] * a[0] + m[5] * a[1] + m[9] * a[2],
-                         m[2] * a[0] + m[6] * a[1] + m[10] * a[2] };
-        };
-        const auto ToWorld = [&](Vec3 v) { return right * v.x + up * v.y + back * v.z; };
-        bikeFwd = Normalize(ToWorld(ToCamera(pose.forward)));
-        const Vec3 u = ToWorld(ToCamera(pose.up));
-        bikeUp = Normalize(u - bikeFwd * Dot(u, bikeFwd));
-        haveBike = Length(bikeFwd) > 0.5 && Length(Cross(bikeFwd, bikeUp)) > 0.5;
-    }
-    if (haveBike) {
-        bikeAtt = Measure(bikeFwd, bikeUp, worldUp);
-        if (onGround && bikeAtt.level > 0.5)
-            g_bikePitchRest.Add(bikeAtt.pitch * kRadToDeg, dt);
-
-        // Where the game camera points relative to the bike: its look-down angle, and the
-        // look-left / right / back keys.
-        const Vec3 bikeRight = Cross(bikeFwd, bikeUp);
-        const double x = Dot(rawFwd, bikeRight), y = Dot(rawFwd, bikeUp), z = Dot(rawFwd, bikeFwd);
-        lookYaw = std::atan2(x, z);
-        if (std::fabs(lookYaw) < 20.0 * kDegToRad)
-            g_gameAngleRest.Add(std::atan2(y, std::sqrt(x * x + z * z)) * kRadToDeg, dt);
-    }
-    const double absYawDeg = std::fabs(lookYaw) * kRadToDeg;
-
-    // Pitch lock works on the pitch *away from rest*, so riding on flat ground looks the same
-    // at any setting and only wheelies, stoppies and jump faces are evened out.
-    const double pitchExcess = haveBike ? (bikeAtt.pitch - g_bikePitchRest.Degrees() * kDegToRad)
-                                        : (cameraAtt.pitch - g_cameraPitchRest.Degrees() * kDegToRad);
-
-    // ---- 6. Target view -------------------------------------------------------------------
-    // Whip centering: while airborne, turn the view from the bike's nose toward the direction of
-    // travel. Inside WhipFreeAngle the view stays on the travel direction; past it the view
-    // follows the extra swing. WhipFollow blends back toward the nose.
-    const auto WhipCorrection = [&](Vec3 nose) {
-        Vec3 travel = g_state.velocity - worldUp * Dot(g_state.velocity, worldUp);
-        const double speed = Length(travel);
-        if (!cfg.whipCentering || speed < 1e-3)
-            return 0.0;
-        travel = travel / speed;
-        const double w       = std::atan2(Dot(nose, Normalize(Cross(travel, worldUp))), Dot(nose, travel));
-        const double free    = cfg.whipFreeAngleDeg * kDegToRad;
-        const double excess  = w > 0 ? std::fmax(0.0, w - free) : std::fmin(0.0, w + free);
-        const double wanted  = excess + cfg.whipFollow * (w - excess);
-        // Only in the air, at speed, and never for a sideways look or a bike going backwards.
-        const double weight  = g_state.airborne * SmoothStep(3.0, 6.0, speed) *
-                               (1.0 - SmoothStep(60.0 * kDegToRad, 80.0 * kDegToRad, std::fabs(w)));
-        return (wanted - w) * weight;
-    };
-
-    // Game camera: the game's view with the locks applied.
-    double whip = WhipCorrection(cameraAtt.heading);
-    const double gamePitch = cameraAtt.pitch - cfg.pitchLock * pitchExcess;
-    const double gameRoll  = LockedRoll(cameraAtt, cfg.horizonLock, cfg);
-    Quat target = Build(Turn(cameraAtt.heading, whip, worldUp), gamePitch, gameRoll, worldUp);
-
-    // Custom camera: built from the bike only.
-    g_customWeight += (((cfg.customCamera && haveBike) ? 1.0 : 0.0) - g_customWeight) * LowPassAlpha(3.0, dt);
-    if (!haveBike || reset)
-        g_customWeight = (cfg.customCamera && haveBike) ? 1.0 : 0.0;
-    if (g_customWeight > 1e-3) {
-        const double angleDown = cfg.keepGameAngle ? -g_gameAngleRest.Degrees() : cfg.cameraAngleDeg;
-        const double pitch = (1.0 - cfg.pitchLock) * pitchExcess - angleDown * kDegToRad;
-        const double roll  = LockedRoll(bikeAtt, cfg.horizonLock, cfg);
-        // The game's look keys turn the camera 90 / 180 degrees; small offsets (the game's own
-        // whip or gimbal) are ignored.
-        const double look = lookYaw * SmoothStep(20.0, 45.0, absYawDeg);
-        const double customWhip = WhipCorrection(bikeAtt.heading);
-        const Quat custom = Build(Turn(bikeAtt.heading, customWhip, worldUp), pitch, roll, worldUp, look);
-        target = Slerp(target, custom, g_customWeight);
-        whip += (customWhip - whip) * g_customWeight;
-    }
-    g_lastHeading = cameraAtt.heading;
-
-    // Head position: along the bike (custom) or the game camera's own axes.
-    const double lookAlpha = LowPassAlpha(10.0, dt);
-    const double sideTarget = haveBike ? SmoothStep(30.0, 70.0, absYawDeg) * (1.0 - SmoothStep(110.0, 150.0, absYawDeg)) : 0.0;
-    const double backTarget = haveBike ? SmoothStep(110.0, 150.0, absYawDeg) : 0.0;
-    g_state.lookSide += (sideTarget - g_state.lookSide) * (reset ? 1.0 : lookAlpha);
-    g_state.lookBack += (backTarget - g_state.lookBack) * (reset ? 1.0 : lookAlpha);
-    const double side = g_state.lookSide * g_customWeight, rear = g_state.lookBack * g_customWeight;
-    const double forwardOffset = cfg.headForward + side * cfg.lookSideForward + rear * cfg.lookBackForward;
-    const double heightOffset  = cfg.headHeight + side * cfg.lookSideHeight + rear * cfg.lookBackHeight;
-    Vec3 offsetFwd = rawFwd, offsetUp = up;
-    if (haveBike) {
-        offsetFwd = offsetFwd + (bikeFwd - offsetFwd) * g_customWeight;
-        offsetUp  = offsetUp + (bikeUp - offsetUp) * g_customWeight;
-    }
-    const Vec3 headOffset = offsetFwd * forwardOffset + offsetUp * heightOffset;
-
-    // ---- 7. Inertial smoothing (pitch / yaw / roll) ---------------------------------------
-    // Exponential slerp toward the target, filtering out high-frequency spikes. MaxLagDeg caps
-    // how far behind the view can fall during sustained fast motion.
-    Quat& smooth = g_state.smoothRot;
-    if (reset)
-        smooth = target;
-    smooth = Slerp(smooth, target, LowPassAlpha(cfg.rotationResponse, dt));
-    const double lag    = AngleBetween(smooth, target);
-    const double maxLag = cfg.maxLagDeg * kDegToRad;
-    if (lag > maxLag)
-        smooth = Slerp(target, smooth, maxLag / lag);
-    Quat rot = smooth;
-
     // ---- 8. Vertical damping & G-force neck compression ---------------------------------
     const double rawHeight = Dot(rawPos, worldUp);
     if (dt > 1e-5) {
@@ -435,20 +555,13 @@ bool Update(const double view[16], double correction[16])
     g_state.prevPos = rawPos;
 
     const double verticalOffset = (g_state.smoothHeight - rawHeight) + g_state.neckOffset;
+    const Vec3 headOffset = g_frame.offsetFwd * g_frame.forwardOffset + g_frame.offsetUp * g_frame.heightOffset;
     const Vec3 eye = rawPos + headOffset + worldUp * verticalOffset;
 
-    // Compression also nods the head forward a little (rotation about the camera's right axis;
-    // a negative angle pitches down).
-    if (cfg.nodDegPerMeter != 0) {
-        const Vec3 pitchAxis = Rotate(rot, { 1, 0, 0 });
-        rot = AxisAngle(pitchAxis, g_state.neckOffset * cfg.nodDegPerMeter * kDegToRad) * rot;
-    }
-    rot = Normalize(rot);
-
     // ---- 9. Rebuild the view matrix and derive the eye-space correction -----------------
-    const Vec3 R = Rotate(rot, { 1, 0, 0 });
-    const Vec3 U = Rotate(rot, { 0, 1, 0 });
-    const Vec3 B = Rotate(rot, { 0, 0, 1 });
+    const Vec3 R = Rotate(g_frame.rot, { 1, 0, 0 });
+    const Vec3 U = Rotate(g_frame.rot, { 0, 1, 0 });
+    const Vec3 B = Rotate(g_frame.rot, { 0, 0, 1 });
     const double s = scale;
     const double newView[16] = {
         s * R.x, s * U.x, s * B.x, 0,
@@ -461,22 +574,31 @@ bool Update(const double view[16], double correction[16])
         return false;
     MatMul(newView, rawInverse, correction);
 
-    const Attitude finalAtt = Measure(-B, U, worldUp);
-    g_telemetry.dtMs              = dt * 1000.0;
-    g_telemetry.lagDeg            = AngleBetween(g_state.smoothRot, target) * kRadToDeg;
-    g_telemetry.rawRollDeg        = (haveBike ? bikeAtt.roll : cameraAtt.roll) * kRadToDeg;
-    g_telemetry.rollCorrectionDeg = (finalAtt.roll - cameraAtt.roll) * kRadToDeg;
-    g_telemetry.pitchExcessDeg    = pitchExcess * kRadToDeg;
-    g_telemetry.viewPitchDeg      = finalAtt.pitch * kRadToDeg;
-    g_telemetry.lookYawDeg        = lookYaw * kRadToDeg;
-    g_telemetry.whipDeg           = whip * kRadToDeg;
-    g_telemetry.airborne          = g_state.airborne;
-    g_telemetry.bikeTracked       = haveBike;
-    g_telemetry.customActive      = g_customWeight > 0.5;
-    g_telemetry.verticalAccelG    = verticalAccel / kGravity;
-    g_telemetry.neckOffset        = g_state.neckOffset;
-    g_telemetry.verticalOffset    = verticalOffset;
+    g_telemetry.verticalAccelG = verticalAccel / kGravity;
+    g_telemetry.airborne       = g_state.airborne;
+    g_telemetry.neckOffset     = g_state.neckOffset;
+    g_telemetry.verticalOffset = verticalOffset;
     return true;
+}
+
+bool Update(const double view[16], double correction[16])
+{
+    // Reuse the orientation if it was already worked out this frame (from the sky) from the same
+    // raw camera rotation; otherwise work it out now.
+    bool sameRotation = false;
+    if (g_frame.oriented) {
+        Vec3 right, up, back;
+        double scale;
+        if (DecomposeView(view, right, up, back, scale)) {
+            const double c = Dot(right, g_frame.rawRight) + Dot(up, g_frame.rawUp) + Dot(back, g_frame.rawBack);
+            sameRotation = c > 3.0 - 1e-5;  // within ~0.15 degrees
+        }
+        if (!sameRotation && g_cutsLogged++ < 20)
+            Log("camera: the sky's rotation differs from the camera's this frame; orientation recomputed");
+    }
+    if (!sameRotation && !OrientFrame(view))
+        return false;
+    return FinishFrame(view, correction);
 }
 
 }  // namespace camera

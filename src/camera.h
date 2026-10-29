@@ -33,7 +33,20 @@ void Reset();
 
 // view: the game's raw world->eye matrix (column-major). Returns false - leaving the frame
 // untouched - if it isn't a rigid camera transform (e.g. the wrong load was picked).
+// Runs OrientFrame() unless it already ran this frame for the same rotation, then the position
+// half of the pipeline.
 bool Update(const double view[16], double correction[16]);
+
+// First half only: works out the view's orientation from any matrix that carries this frame's
+// raw camera rotation (e.g. the sky's rotation-only view, drawn before the camera position).
+bool OrientFrame(const double view[16]);
+
+// Rotation-only correction (no translation) for the orientation worked out this frame. Things
+// drawn infinitely far away, like the sky, take this instead of the full correction.
+bool RotationCorrection(double out[16]);
+
+// The frame ended without a camera: forget a pending OrientFrame().
+void AbandonFrame();
 
 const Telemetry& LastTelemetry();
 
