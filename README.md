@@ -2,7 +2,7 @@
 
 MX Simulator Dynamic First Person Camera Mod
 
-https://www.youtube.com/watch?v=rlgx4rW7rfI
+https://www.youtube.com/watch?v=rlgx4rW7rfI (doesn't look as smooth here because my settings were bad)
 
 
 **INSTRUCTIONS**
