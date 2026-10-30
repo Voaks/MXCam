@@ -667,7 +667,7 @@ RowDef Choice(int tab, const char* section, const char* label, bool Config::* fl
     return { tab, section, label, RowKind::Choice, nullptr, flag, 0, 1, 1, 1, 0, "", nullptr, offText, onText, false };
 }
 
-const char* const kTabs[] = { "VIEW", "WHIP & LOOK", "NECK" };
+const char* const kTabs[] = { "VIEW", "AIR & LOOK", "NECK" };
 constexpr int kTabCount = static_cast<int>(sizeof kTabs / sizeof kTabs[0]);
 
 const RowDef kRows[] = {
@@ -679,10 +679,8 @@ const RowDef kRows[] = {
     Slider(0, nullptr,          "Pitch lock",          &Config::pitchLock,        0.0,   1.0,  0.01, 100.0, 0, "%", "Off"),
     Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -0.6,  0.6,  0.01, 1.0,   2, " m"),
     Slider(0, nullptr,          "Head height",         &Config::headHeight,       -0.6,  0.6,  0.01, 1.0,   2, " m"),
-    // ---- WHIP & LOOK ----
-    Toggle(1, "WHIP (IN THE AIR)", "Whip centering",   &Config::whipCentering),
-    Slider(1, nullptr,          "Follow the nose",     &Config::whipFollow,       0.0,   1.0,  0.01, 100.0, 0, "%"),
-    Slider(1, nullptr,          "Free angle",          &Config::whipFreeAngleDeg, 0.0,   75.0, 1.0,  1.0,   0, "\xB0"),
+    // ---- AIR & LOOK ----
+    Slider(1, "IN THE AIR",     "Looseness",           &Config::airLooseness,     0.0,   1.0,  0.01, 100.0, 0, "%", "Off"),
     Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
     Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
     Slider(1, nullptr,          "Back: forward",       &Config::lookBackForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
@@ -924,8 +922,6 @@ bool RowInactive(const RowDef& def, const Config& cfg)
         return true;
     if (def.number == &Config::cameraAngleDeg && cfg.keepGameAngle)
         return true;
-    if ((def.number == &Config::whipFollow || def.number == &Config::whipFreeAngleDeg) && !cfg.whipCentering)
-        return true;
     return false;
 }
 
@@ -1143,8 +1139,8 @@ void BuildPanel(int screenHeight, const Input& in, double now)
                      t.customActive ? "CUSTOM CAM" : (t.bikeTracked ? "BIKE FOUND" : "GAME CAM"),
                      t.pitchExcessDeg, std::fabs(t.rawRollDeg));
     } else if (g_panel.tab == 1) {
-        snprintf(readout, sizeof readout, "%s   WHIP %+.0f\xB0   LOOK %+.0f\xB0",
-                 t.airborne > 0.5 ? "IN THE AIR" : "ON THE GROUND", t.whipDeg, t.lookYawDeg);
+        snprintf(readout, sizeof readout, "%s   SWING %+.0f\xB0   LOOK %+.0f\xB0",
+                 t.airborne > 0.5 ? "IN THE AIR" : "ON THE GROUND", t.airYawDeg, t.lookYawDeg);
     } else {
         snprintf(readout, sizeof readout, "LAG %.1f\xB0   %.1f G   NECK %+.0f MM", t.lagDeg,
                  1.0 + t.verticalAccelG, t.neckOffset * 1000.0);

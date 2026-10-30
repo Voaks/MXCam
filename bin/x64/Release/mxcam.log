@@ -1,24 +1,24 @@
-[23:53:07.610] MXCam opengl32 proxy loaded (x64 build)
-[23:53:07.619] config: loaded V:\random code\MX Simulator Camera Mod\bin\x64\Release\mxcam.ini (enabled=1, game camera, modelview='u_modelview', camera program has 'u_heights', up=0.00,1.00,0.00)
-[23:53:07.622] forwarding to C:\Windows\system32\opengl32.dll: 368 exports, 22 hooked, 0 missing
-[23:53:07.812] panel: opened
-[23:53:07.816] overlay: ready (GLSL version 150)
-[23:53:10.503] proc: glCreateShader
-[23:53:10.503] proc: glShaderSource
-[23:53:10.503] proc: glCompileShader
-[23:53:10.503] proc: glCreateProgram
-[23:53:10.503] proc: glAttachShader
-[23:53:10.503] proc: glLinkProgram
-[23:53:10.503] proc: glGetProgramiv
-[23:53:10.503] proc: glUseProgram (wrapped)
-[23:53:10.503] proc: glGetUniformLocation (wrapped)
-[23:53:10.503] proc: glUniformMatrix4fv (wrapped)
-[23:53:10.503] proc: glGetUniformfv
-[23:53:10.503] proc: glUniform3fv (wrapped)
-[23:53:10.503] uniform: program 6 'u_modelview' = location 1
-[23:53:10.503] uniform: program 6 'u_heights' = location 0
-[23:53:10.503] uniform: program 9 'u_modelview' = location 1
-[23:53:10.503] uniform: program 9 'u_light_position' = location 0
-[23:53:10.859] camera: cut detected (105.77 units), resetting the position filters
-[23:53:11.897] bike: tracking an object of program 9 (draw #1): the camera sits at (-0.00, 1.21, 0.30) in its space, bounce 185 mm, wobble 7.5 deg; forward axis -Z, up axis +Y
-[23:53:14.528] proc: glActiveTexture
+[00:30:58.893] MXCam opengl32 proxy loaded (x64 build)
+[00:30:58.895] config: loaded V:\random code\MX Simulator Camera Mod\bin\x64\Release\mxcam.ini (enabled=1, game camera, modelview='u_modelview', camera program has 'u_heights', up=0.00,1.00,0.00)
+[00:30:58.897] forwarding to C:\Windows\system32\opengl32.dll: 368 exports, 22 hooked, 0 missing
+[00:30:59.034] panel: opened
+[00:30:59.037] overlay: ready (GLSL version 150)
+[00:31:01.734] proc: glCreateShader
+[00:31:01.734] proc: glShaderSource
+[00:31:01.734] proc: glCompileShader
+[00:31:01.734] proc: glCreateProgram
+[00:31:01.734] proc: glAttachShader
+[00:31:01.734] proc: glLinkProgram
+[00:31:01.734] proc: glGetProgramiv
+[00:31:01.734] proc: glUseProgram (wrapped)
+[00:31:01.734] proc: glGetUniformLocation (wrapped)
+[00:31:01.734] proc: glUniformMatrix4fv (wrapped)
+[00:31:01.734] proc: glGetUniformfv
+[00:31:01.734] proc: glUniform3fv (wrapped)
+[00:31:01.734] uniform: program 6 'u_modelview' = location 1
+[00:31:01.734] uniform: program 6 'u_heights' = location 0
+[00:31:01.734] uniform: program 9 'u_modelview' = location 1
+[00:31:01.734] uniform: program 9 'u_light_position' = location 0
+[00:31:02.092] camera: cut detected (105.77 units), resetting the position filters
+[00:31:03.127] bike: tracking an object of program 9 (draw #1): the camera sits at (-0.00, 1.21, 0.30) in its space, bounce 185 mm, wobble 7.5 deg; forward axis -Z, up axis +Y
+[00:31:05.748] proc: glActiveTexture

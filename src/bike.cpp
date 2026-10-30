@@ -380,7 +380,6 @@ void EndFrame(double contentTime, double frameDt)
         const Vec3 worldUp{ cfg.worldUp[0], cfg.worldUp[1], cfg.worldUp[2] };
         g_pose.haveAccel = g_bikeFit.Estimate(0.15, velocity, accel);
         g_pose.verticalAccelG = g_pose.haveAccel ? Dot(accel, worldUp) / kGravity : 0.0;
-        g_pose.worldVelocity[0] = velocity.x; g_pose.worldVelocity[1] = velocity.y; g_pose.worldVelocity[2] = velocity.z;
         g_bikePos = pos;
         g_haveBikePos = true;
     } else if (!locked) {

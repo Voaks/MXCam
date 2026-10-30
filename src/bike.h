@@ -41,10 +41,8 @@ struct Pose {
     double worldUp[3]      = { 0, 1, 0 };
     // The bike model's origin in world space in the latest matched frame.
     double worldPosition[3] = {};
-    // The bike's own velocity (units/s) and vertical acceleration along WorldUp, in g (free
-    // fall: -1). Unlike the camera's, they don't swing with the rider's head.
+    // The bike's own vertical acceleration along WorldUp, in g (free fall: -1).
     bool   haveAccel      = false;
-    double worldVelocity[3] = {};
     double verticalAccelG = 0;
 };
 

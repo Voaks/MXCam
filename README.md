@@ -12,7 +12,7 @@ reworks it with some simple physics:
   point the view at the sky.
 - **Custom camera** (optional): the view is built from the rider's own bike, so the game's
   1st Person Angle and Gimbal settings no longer matter. It has its own look-down angle, head
-  position, whip centering and look-around offsets.
+  position, air looseness and look-around offsets.
 - **Neck compression**: a spring-damper driven by vertical acceleration. Hard landings make the
   head sag and nod, and airtime lets it float. The eye height is also low-pass filtered to iron
   out jitter.
@@ -109,7 +109,7 @@ steers, so the bike frame wins. The lock is held through gaps of up to half a se
 custom camera eases in and out instead of snapping. The bike's forward and up model axes are
 taken as the ones nearest the camera's. The custom camera then uses the bike's own world-space
 orientation, so the game camera's wobble against the bike never reaches the view, and the
-bike's own vertical acceleration decides when you're airborne (for whip centering), so camera
+bike's own vertical acceleration decides when you're airborne (for air looseness), so camera
 bounces on the ground can't fake a jump. The log says when the bike is found or lost, and the
 F10 dump lists every track with its bounce and wobble.
 
@@ -141,7 +141,7 @@ that turns the effect on or off, and three tabs. Changes apply immediately.
 
 - **VIEW**: game or custom camera, keep game angle, look-down angle, horizon lock, pitch lock,
   head forward / back and head height.
-- **WHIP & LOOK**: whip centering, follow the nose, free angle, and the eye offsets while
+- **AIR & LOOK**: air looseness, and the eye offsets while
   looking sideways or back.
 - **NECK**: rotation smoothing and the neck / impact physics.
 
@@ -175,7 +175,7 @@ restores every piece of GL state it touches, and costs nothing while it's closed
 | `HeadForward` / `HeadHeight` | 0 / 0 | Eye offset in metres along the bike (game camera: its own axes). |
 | `HorizonLock` | 0.6 | 0 keeps the stock roll, 1 locks the horizon level. (Was `LeanCompensation`.) |
 | `PitchLock` | 0.5 | Share of the bike's pitch removed: wheelies, stoppies, jump faces. |
-| `WhipCentering` / `WhipFollow` / `WhipFreeAngleDeg` | 1 / 0.3 / 10 | On jumps (after 0.4 s of free fall, so never for hops through a corner), keep the view on the direction of travel when the bike is whipped. The direction comes from the bike's own motion and is frozen at takeoff; only the nose's swing *after* takeoff counts as whip, so leaving a berm sideways or mid-slide doesn't pull the view. |
+| `AirLooseness` | 0.6 | In the air, the view follows the bike's left / right swing (scrubs, whips) only through a slow filter, so it keeps pointing forward more; it catches up smoothly after landing. The view never trails the nose by more than 15 deg x looseness, so turning the bike through a jump out of a corner doesn't leave it behind. 0 = tight, 1 = very loose. Nothing is locked to a direction of travel. |
 | `LookSide*` / `LookBack*` | 0 | Custom camera: extra eye offsets while looking sideways or back. |
 | `VerticalResponse` / `MaxVerticalLag` | 20 /s / 0.05 | Low-pass filter on eye height. |
 | `CompressionPerG` | 0.012 | How far the neck sags per g of vertical acceleration. |

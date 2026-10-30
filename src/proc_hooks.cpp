@@ -257,10 +257,10 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         if (g_camera.haveCorrection) {
             const camera::Telemetry& t = camera::LastTelemetry();
             DumpCall("^ CAMERA  dt=%.1fms lag=%.2fdeg roll=%.2fdeg rollCorr=%.2fdeg pitchExcess=%.1fdeg "
-                     "viewPitch=%.1fdeg lookYaw=%.0fdeg whip=%.1fdeg air=%.2f bike=%s %s accelUp=%.2fg "
+                     "viewPitch=%.1fdeg lookYaw=%.0fdeg airYaw=%.1fdeg air=%.2f bike=%s %s accelUp=%.2fg "
                      "neck=%.1fmm eyeHeight%+.1fmm",
                      t.dtMs, t.lagDeg, t.rawRollDeg, t.rollCorrectionDeg, t.pitchExcessDeg, t.viewPitchDeg,
-                     t.lookYawDeg, t.whipDeg, t.airborne, t.bikeTracked ? "yes" : "no",
+                     t.lookYawDeg, t.airYawDeg, t.airborne, t.bikeTracked ? "yes" : "no",
                      t.customActive ? "CUSTOM" : "GAME", t.verticalAccelG, t.neckOffset * 1000.0,
                      t.verticalOffset * 1000.0);
         } else {
@@ -508,7 +508,7 @@ void StartTrace(double seconds)
     }
     fprintf(g_trace, "time_ms,interval_ms,step_ms,sky_previews,other_rotations,cut,reset,bike,bike_fresh,custom,"
                      "raw_yaw,raw_pitch,raw_roll,bike_yaw,bike_pitch,bike_roll,view_yaw,view_pitch,view_roll,"
-                     "lag_deg,look_yaw,whip_deg,air,fall_g,accel_up_g,neck_mm,"
+                     "lag_deg,look_yaw,air_yaw,air,fall_g,accel_up_g,neck_mm,"
                      "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz,bike_x,bike_y,bike_z\n");
     // Times are relative to the key press: the history before it is negative.
     const double now = camera::ContentTime();
@@ -555,7 +555,7 @@ void TraceFrame(bool captured)
             t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
             t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
             t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
-            t.lagDeg, t.lookYawDeg, t.whipDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
+            t.lagDeg, t.lookYawDeg, t.airYawDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
             t.rawPos[0], t.rawPos[1], t.rawPos[2], t.eyeOffset[0], t.eyeOffset[1], t.eyeOffset[2],
             pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2]);
     }

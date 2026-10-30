@@ -43,10 +43,8 @@ struct Config {
     double pitchLock            = 0.5;    // 0..1 fraction of the bike's pitch removed (wheelies, jump faces)
     double maxRollCorrectionDeg = 90.0;
 
-    // [Whip] (while airborne)
-    bool   whipCentering    = true;       // keep the view on the direction of travel when the bike is whipped
-    double whipFollow       = 0.3;        // 0..1 how much the view still follows the bike's nose
-    double whipFreeAngleDeg = 10.0;       // the nose can swing this far before the view follows fully
+    // [Air]
+    double airLooseness     = 0.6;        // 0..1 how much of the nose's left / right swing in the air the view lets pass
 
     // [Look] extra eye offsets while looking sideways / back (custom camera)
     double lookSideForward = 0.0;

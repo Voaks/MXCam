@@ -20,7 +20,7 @@ struct Telemetry {
     double pitchExcessDeg    = 0;  // bike pitch away from its resting pitch (wheelie > 0)
     double viewPitchDeg      = 0;  // final view pitch (+ = up)
     double lookYawDeg        = 0;  // game camera vs bike heading (look left / right / back)
-    double whipDeg           = 0;  // whip-centering turn applied to the view
+    double airYawDeg         = 0;  // air looseness: turn applied to the view in the air
     double airborne          = 0;  // 0..1
     bool   bikeTracked       = false;
     bool   bikeFresh         = false;  // the bike's own world pose was used (not carried via the camera)

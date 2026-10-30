@@ -99,9 +99,7 @@ bool SaveConfig()
         { L"Leveling",  L"HorizonLock",          g_config.horizonLock },
         { L"Leveling",  L"PitchLock",            g_config.pitchLock },
         { L"Leveling",  L"MaxRollCorrectionDeg", g_config.maxRollCorrectionDeg },
-        { L"Whip",      L"WhipCentering",        g_config.whipCentering ? 1.0 : 0.0 },
-        { L"Whip",      L"WhipFollow",           g_config.whipFollow },
-        { L"Whip",      L"WhipFreeAngleDeg",     g_config.whipFreeAngleDeg },
+        { L"Air",       L"AirLooseness",         g_config.airLooseness },
         { L"Look",      L"LookSideForward",      g_config.lookSideForward },
         { L"Look",      L"LookSideHeight",       g_config.lookSideHeight },
         { L"Look",      L"LookBackForward",      g_config.lookBackForward },
@@ -142,9 +140,7 @@ void ResetTunables()
     g_config.horizonLock          = defaults.horizonLock;
     g_config.pitchLock            = defaults.pitchLock;
     g_config.maxRollCorrectionDeg = defaults.maxRollCorrectionDeg;
-    g_config.whipCentering        = defaults.whipCentering;
-    g_config.whipFollow           = defaults.whipFollow;
-    g_config.whipFreeAngleDeg     = defaults.whipFreeAngleDeg;
+    g_config.airLooseness         = defaults.airLooseness;
     g_config.lookSideForward      = defaults.lookSideForward;
     g_config.lookSideHeight       = defaults.lookSideHeight;
     g_config.lookBackForward      = defaults.lookBackForward;
@@ -208,9 +204,7 @@ void ReloadConfig()
     c.pitchLock            = ReadDouble(L"Leveling", L"PitchLock", c.pitchLock);
     c.maxRollCorrectionDeg = ReadDouble(L"Leveling", L"MaxRollCorrectionDeg", c.maxRollCorrectionDeg);
 
-    c.whipCentering    = ReadInt(L"Whip", L"WhipCentering", c.whipCentering) != 0;
-    c.whipFollow       = ReadDouble(L"Whip", L"WhipFollow", c.whipFollow);
-    c.whipFreeAngleDeg = ReadDouble(L"Whip", L"WhipFreeAngleDeg", c.whipFreeAngleDeg);
+    c.airLooseness     = ReadDouble(L"Air", L"AirLooseness", c.airLooseness);
 
     c.lookSideForward = ReadDouble(L"Look", L"LookSideForward", c.lookSideForward);
     c.lookSideHeight  = ReadDouble(L"Look", L"LookSideHeight", c.lookSideHeight);
@@ -240,8 +234,7 @@ void ReloadConfig()
     c.horizonLock          = Clamp(c.horizonLock, 0.0, 1.0);
     c.pitchLock            = Clamp(c.pitchLock, 0.0, 1.0);
     c.maxRollCorrectionDeg = Clamp(c.maxRollCorrectionDeg, 0.0, 180.0);
-    c.whipFollow           = Clamp(c.whipFollow, 0.0, 1.0);
-    c.whipFreeAngleDeg     = Clamp(c.whipFreeAngleDeg, 0.0, 75.0);
+    c.airLooseness         = Clamp(c.airLooseness, 0.0, 1.0);
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);
