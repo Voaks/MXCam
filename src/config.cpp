@@ -116,6 +116,9 @@ bool SaveConfig()
     };
 
     bool ok = WritePrivateProfileStringW(L"General", L"Enabled", g_config.enabled ? L"1" : L"0", g_path) != FALSE;
+    wchar_t menuKey[16];
+    swprintf_s(menuKey, L"0x%02X", g_config.menuKey);
+    ok = WritePrivateProfileStringW(L"General", L"MenuKey", menuKey, g_path) != FALSE && ok;
     for (const Value& v : values) {
         wchar_t text[32];
         swprintf_s(text, L"%.6g", v.value);

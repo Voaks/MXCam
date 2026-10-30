@@ -245,7 +245,7 @@ constexpr int kAtlasSize = 1024;
 constexpr int kDiscX = 16, kDiscY = 4, kDiscSize = 64;
 constexpr int kGlyphTop = kDiscY + kDiscSize + 8;
 
-enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontCount };
+enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontTiny, kFontCount };
 
 struct Glyph {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
@@ -307,6 +307,7 @@ bool BuildAtlas(GLuint texture, float scale)
         { 15, FW_NORMAL },    // kFontBody
         { 15, FW_SEMIBOLD },  // kFontValue
         { 12, FW_SEMIBOLD },  // kFontSmall (smaller gets crunchy once GDI hinting kicks in)
+        { 11, FW_NORMAL },    // kFontTiny (the credit's aside only)
     };
     const int pad = 2;
     int penX = 0, penY = kGlyphTop, rowHeight = 0;
@@ -613,6 +614,38 @@ float TextWidth(FontId font, const char* text, float tracking)
     return count ? width + tracking * (count - 1) : 0;
 }
 
+constexpr int kMaxWrapLines = 6;
+constexpr int kWrapLineSize = 160;
+
+// Splits text into lines no wider than width, breaking at spaces. Returns the line count.
+int WrapText(FontId font, const char* text, float width, char (&lines)[kMaxWrapLines][kWrapLineSize])
+{
+    int count = 0;
+    while (*text && count < kMaxWrapLines) {
+        char* line = lines[count++];
+        size_t length = 0;
+        while (*text) {
+            const char* end = text;
+            while (*end && *end != ' ')
+                ++end;
+            const size_t word = static_cast<size_t>(end - text);
+            const size_t joined = length + (length ? 1 : 0) + word;
+            if (joined >= kWrapLineSize)
+                break;
+            char candidate[kWrapLineSize];
+            snprintf(candidate, sizeof candidate, "%.*s%s%.*s", static_cast<int>(length), line, length ? " " : "",
+                     static_cast<int>(word), text);
+            if (length && TextWidth(font, candidate, 0) > width)
+                break;  // the word starts the next line
+            memcpy(line, candidate, joined + 1);
+            length = joined;
+            text = *end ? end + 1 : end;
+        }
+        line[length] = '\0';
+    }
+    return count;
+}
+
 void Text(FontId font, float x, float y, const char* text, uint32_t color, float tracking)
 {
     float pen = x;
@@ -630,7 +663,7 @@ void Text(FontId font, float x, float y, const char* text, uint32_t color, float
 // ===========================================================================
 // Panel state, input and window subclass
 // ===========================================================================
-enum class RowKind { Slider, Toggle, Choice };
+enum class RowKind { Slider, Toggle, Choice, Key };
 
 struct RowDef {
     int              tab;
@@ -647,6 +680,15 @@ struct RowDef {
     const char*      offText;   // Choice: the two options
     const char*      onText;
     bool             customOnly;  // only does something with the custom camera
+    int Config::*    key = nullptr;  // Key: a virtual-key code, picked by pressing the key
+    const char*      help = nullptr; // shown beside the panel while the row is selected / under the mouse
+
+    RowDef Help(const char* text) const
+    {
+        RowDef def = *this;
+        def.help = text;
+        return def;
+    }
 };
 
 RowDef Slider(int tab, const char* section, const char* label, double Config::* field, double min, double max,
@@ -667,33 +709,66 @@ RowDef Choice(int tab, const char* section, const char* label, bool Config::* fl
     return { tab, section, label, RowKind::Choice, nullptr, flag, 0, 1, 1, 1, 0, "", nullptr, offText, onText, false };
 }
 
-const char* const kTabs[] = { "VIEW", "AIR & LOOK", "NECK" };
+RowDef KeyRow(int tab, const char* section, const char* label, int Config::* key)
+{
+    return { tab, section, label, RowKind::Key, nullptr, nullptr, 0, 1, 1, 1, 0, "", nullptr, nullptr, nullptr, false, key };
+}
+
+const char* const kTabs[] = { "VIEW", "AIR & LOOK", "NECK FX" };
 constexpr int kTabCount = static_cast<int>(sizeof kTabs / sizeof kTabs[0]);
 
 const RowDef kRows[] = {
     // ---- VIEW ----
-    Choice(0, "CAMERA",         "Camera",              &Config::customCamera, "GAME", "CUSTOM"),
-    Toggle(0, nullptr,          "Keep game angle",     &Config::keepGameAngle, true),
-    Slider(0, nullptr,          "Look-down angle",     &Config::cameraAngleDeg,   -10.0, 30.0, 0.5,  1.0,   1, "\xB0", nullptr, true),
-    Slider(0, "STABILIZATION",  "Horizon lock",        &Config::horizonLock,      0.0,   1.0,  0.01, 100.0, 0, "%", "Off"),
-    Slider(0, nullptr,          "Pitch lock",          &Config::pitchLock,        0.0,   1.0,  0.01, 100.0, 0, "%", "Off"),
-    Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -0.6,  0.6,  0.01, 1.0,   2, " m"),
-    Slider(0, nullptr,          "Head height",         &Config::headHeight,       -0.6,  0.6,  0.01, 1.0,   2, " m"),
+    Choice(0, "CAMERA",         "Camera",              &Config::customCamera, "GAME", "CUSTOM")
+        .Help("GAME adjusts the game's own first-person camera. CUSTOM builds the view from your bike "
+              "instead (ride a few metres after loading so it can find the bike)."),
+    Toggle(0, nullptr,          "Keep game angle",     &Config::keepGameAngle, true)
+        .Help("Custom camera: use the game's 1st Person Angle instead of the look-down angle below."),
+    Slider(0, nullptr,          "Look-down angle",     &Config::cameraAngleDeg,   -10.0, 30.0, 0.5,  1.0,   1, "\xB0", nullptr, true)
+        .Help("Custom camera: how far the view tilts down. Negative tilts it up."),
+    Slider(0, "STABILIZATION",  "Horizon lock",        &Config::horizonLock,      0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("How much of the bike's lean is removed from the view. 0% leans with the bike, 100% keeps "
+              "the horizon level."),
+    Slider(0, nullptr,          "Pitch lock",          &Config::pitchLock,        0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("How much of the bike's nose up / down tilt (wheelies, jump faces) is removed. 0% tilts "
+              "with the bike, 100% keeps the view steady."),
+    Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -0.6,  0.6,  0.01, 1.0,   2, " m")
+        .Help("Moves your eyes forward (+) or back (-) along the bike."),
+    Slider(0, nullptr,          "Head height",         &Config::headHeight,       -0.6,  0.6,  0.01, 1.0,   2, " m")
+        .Help("Moves your eyes up (+) or down (-)."),
+    KeyRow(0, "CONTROLS",       "Menu key",            &Config::menuKey)
+        .Help("The key that opens this panel. Click it, then press the new key. Esc cancels."),
     // ---- AIR & LOOK ----
-    Slider(1, "IN THE AIR",     "Looseness",           &Config::airLooseness,     0.0,   1.0,  0.01, 100.0, 0, "%", "Off"),
-    Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
-    Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
-    Slider(1, nullptr,          "Back: forward",       &Config::lookBackForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
-    Slider(1, nullptr,          "Back: height",        &Config::lookBackHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
+    Slider(1, "IN THE AIR",     "Looseness",           &Config::airLooseness,     0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("In the air only: the view keeps pointing forward while the bike swings left / right "
+              "(scrubs, whips), by up to 15\xB0 x this. Off follows the bike tightly."),
+    Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
+        .Help("Custom camera: moves your eyes forward (+) or back (-) while looking left / right."),
+    Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
+        .Help("Custom camera: moves your eyes up (+) or down (-) while looking left / right."),
+    Slider(1, nullptr,          "Back: forward",       &Config::lookBackForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
+        .Help("Custom camera: moves your eyes forward (+) or back (-) while looking back."),
+    Slider(1, nullptr,          "Back: height",        &Config::lookBackHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
+        .Help("Custom camera: moves your eyes up (+) or down (-) while looking back."),
     // ---- NECK ----
-    Slider(2, "SMOOTHING",      "Rotation response",   &Config::rotationResponse, 0.0,   40.0,  0.5,    1.0,    1, " /s", "Off"),
-    Slider(2, nullptr,          "Max lag",             &Config::maxLagDeg,        0.0,   90.0,  0.5,    1.0,    1, "\xB0"),
-    Slider(2, "NECK & IMPACTS", "Landing compression", &Config::compressionPerG,  0.0,   0.05,  0.0005, 1000.0, 1, " mm/g", "Off"),
-    Slider(2, nullptr,          "Max compression",     &Config::maxCompression,   0.0,   0.2,   0.001,  1000.0, 0, " mm"),
-    Slider(2, nullptr,          "Neck stiffness",      &Config::springHz,         0.5,   10.0,  0.1,    1.0,    1, " Hz"),
-    Slider(2, nullptr,          "Neck damping",        &Config::dampingRatio,     0.05,  2.0,   0.05,   1.0,    2, ""),
-    Slider(2, nullptr,          "Head nod",            &Config::nodDegPerMeter,   0.0,   150.0, 1.0,    1.0,    0, "\xB0" "/m", "Off"),
-    Slider(2, nullptr,          "Height smoothing",    &Config::verticalResponse, 0.0,   60.0,  1.0,    1.0,    0, " /s", "Off"),
+    Slider(2, "SMOOTHING",      "Rotation response",   &Config::rotationResponse, 0.0,   40.0,  0.5,    1.0,    1, " /s", "Off")
+        .Help("How fast the view's rotation catches up to the bike. Higher is sharper, lower is "
+              "floatier. Works on the ground and in the air."),
+    Slider(2, nullptr,          "Max lag",             &Config::maxLagDeg,        0.0,   90.0,  0.5,    1.0,    1, "\xB0")
+        .Help("The furthest the smoothed view can fall behind the bike. Past this it turns with the "
+              "bike instead of trailing further."),
+    Slider(2, "NECK & IMPACTS", "Landing compression", &Config::compressionPerG,  0.0,   0.05,  0.0005, 1000.0, 1, " mm/g", "Off")
+        .Help("How much your head sinks on landings and big hits (and lifts in the air)."),
+    Slider(2, nullptr,          "Max compression",     &Config::maxCompression,   0.0,   0.2,   0.001,  1000.0, 0, " mm")
+        .Help("The most your head can sink on a landing."),
+    Slider(2, nullptr,          "Neck stiffness",      &Config::springHz,         0.5,   10.0,  0.1,    1.0,    1, " Hz")
+        .Help("How quickly your head springs back after a hit. Higher is a tighter neck."),
+    Slider(2, nullptr,          "Neck damping",        &Config::dampingRatio,     0.05,  2.0,   0.05,   1.0,    2, "")
+        .Help("How much your head bounces after a hit. Lower is bouncier, 1.00 settles with no bounce."),
+    Slider(2, nullptr,          "Head nod",            &Config::nodDegPerMeter,   0.0,   150.0, 1.0,    1.0,    0, "\xB0" "/m", "Off")
+        .Help("How far your head nods forward as your neck compresses on a landing."),
+    Slider(2, nullptr,          "Height smoothing",    &Config::verticalResponse, 0.0,   60.0,  1.0,    1.0,    0, " /s", "Off")
+        .Help("Smooths small up / down head jitter. Higher follows the bike's height more closely."),
 };
 constexpr int kRowCount = static_cast<int>(sizeof kRows / sizeof kRows[0]);
 
@@ -708,6 +783,9 @@ struct PanelState {
     int    selected     = kFirstRowItem;
     int    dragging     = -1;  // index into kRows of the slider being dragged with the mouse
     int    pressedItem  = -1;  // button the mouse went down on
+    int    listening    = -1;  // index into kRows of the key row waiting for a key press
+    bool   helpForMouse = false;  // the help box follows the mouse (true) or the selection
+    float  mouseX = -1, mouseY = -1;
     bool   dirty        = false;
     bool   closeRequest = false;
     char   status[96]   = "";
@@ -824,6 +902,7 @@ void OpenPanel(HWND window)
     g_panel.open = true;
     g_panel.dragging = -1;
     g_panel.pressedItem = -1;
+    g_panel.listening = -1;
     g_panel.closeRequest = false;
     g_menuOpen = true;
     Log("panel: opened");
@@ -833,6 +912,7 @@ void ClosePanel()
 {
     g_panel.open = false;
     g_panel.dragging = -1;
+    g_panel.listening = -1;
     g_menuOpen = false;
     Log("panel: closed%s", g_panel.dirty ? " (unsaved changes kept for this session)" : "");
 }
@@ -882,6 +962,74 @@ void SetStatus(const char* text, double now)
 {
     snprintf(g_panel.status, sizeof g_panel.status, "%s", text);
     g_panel.statusUntil = now + 2.5;
+}
+
+// The first keyboard key to go down since the last call, or 0. Mouse buttons don't count.
+int PollNewKey()
+{
+    static bool wasDown[256];
+    int pressed = 0;
+    for (int vk = VK_BACK; vk < 0xFF; ++vk) {
+        if (vk >= VK_LSHIFT && vk <= VK_RMENU)  // reported as plain Shift / Ctrl / Alt as well
+            continue;
+        const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (down && !wasDown[vk] && !pressed)
+            pressed = vk;
+        wasDown[vk] = down;
+    }
+    return pressed;
+}
+
+void StartListening(int row)
+{
+    g_panel.listening = row;
+    PollNewKey();  // keys already held (the Enter that got here) don't count as the answer
+}
+
+// Keys the panel steers with, or that another hotkey has, can't open the panel too.
+const char* KeyConflict(int vk, const Config& cfg)
+{
+    switch (vk) {
+    case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT: case VK_RETURN: case VK_SPACE: case VK_SHIFT:
+        return "USED BY THE PANEL";
+    default:
+        break;
+    }
+    if (vk == cfg.toggleKey || vk == cfg.reloadKey || vk == cfg.dumpKey || vk == cfg.traceKey)
+        return "ALREADY AN MXCAM HOTKEY";
+    return nullptr;
+}
+
+// A key row is waiting: Esc cancels, any other key is taken (unless it clashes).
+void ListenForKey(double now)
+{
+    if (kRows[g_panel.listening].tab != g_panel.tab) {  // switched tabs with the mouse
+        g_panel.listening = -1;
+        return;
+    }
+    const int vk = PollNewKey();
+    if (!vk)
+        return;
+    const RowDef& def = kRows[g_panel.listening];
+    g_panel.listening = -1;
+    if (vk == VK_ESCAPE)
+        return;
+
+    Config& cfg = EditConfig();
+    char text[96];
+    if (const char* conflict = KeyConflict(vk, cfg)) {
+        snprintf(text, sizeof text, "%s IS %s", KeyName(vk), conflict);
+        SetStatus(text, now);
+        return;
+    }
+    int& key = cfg.*def.key;
+    if (key != vk) {
+        key = vk;
+        g_panel.dirty = true;
+    }
+    g_keys.menu.down = true;  // the press that picked the key must not also close the panel
+    snprintf(text, sizeof text, "MENU KEY: %s - NOT SAVED YET", KeyName(vk));
+    SetStatus(text, now);
 }
 
 // ===========================================================================
@@ -952,12 +1100,28 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     if (in.nav)
         g_panel.selected = (g_panel.selected + in.nav + itemCount) % itemCount;
 
+    // Help follows whichever was used last: the mouse (what's under it) or the keys (the selection).
+    if (in.inside && (in.mx != g_panel.mouseX || in.my != g_panel.mouseY || in.pressed))
+        g_panel.helpForMouse = true;
+    if (in.nav || in.step || in.activate)
+        g_panel.helpForMouse = false;
+    g_panel.mouseX = in.mx;
+    g_panel.mouseY = in.my;
+    struct HelpSpot { const char* text = nullptr; float y = 0; };
+    HelpSpot hoveredHelp, selectedHelp;
+    const auto OfferHelp = [&](const char* text, float top, bool hot, bool selected) {
+        if (hot)
+            hoveredHelp = { text, top };
+        if (selected)
+            selectedHelp = { text, top };
+    };
+
     const float pad = S(24), panelW = S(384), innerW = panelW - 2 * pad;
-    const float headerH = S(58), tabsH = S(40), sectionH = S(36), rowH = S(46), buttonH = S(36);
+    const float headerH = S(46), tabsH = S(40), sectionH = S(36), rowH = S(46), buttonH = S(36);
     float contentH = 0;
     for (int tab = 0; tab < kTabCount; ++tab)
         contentH = std::fmax(contentH, TabHeight(tab, sectionH, rowH));
-    const float panelH = pad + headerH + tabsH + contentH + S(24) + S(18) + S(18) + buttonH + S(16) + S(14) + S(22);
+    const float panelH = pad + headerH + tabsH + contentH + S(24) + S(18) + S(18) + buttonH + S(16) + S(14) + S(18) + S(22);
     const float px = S(32);
     const float py = std::fmax(S(16), std::round((screenHeight - panelH) * 0.5f));
 
@@ -971,8 +1135,7 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     // ---- Header: title and the on/off switch ----
     const float x = px + pad;
     float y = py + pad;
-    Text(kFontTitle, x, y - S(2), "MXCAM", White(1.0f), S(4));
-    Text(kFontSmall, x, y + S(28), "HELMET CAM", Gray(130), S(2));
+    Text(kFontTitle, x, y + S(2), "MXCam", White(1.0f), S(2));
 
     // A pill switch; returns its outer width.
     const auto Switch = [&](float rightEdge, float centerY, float h, bool on, bool hot) {
@@ -1002,6 +1165,8 @@ void BuildPanel(int screenHeight, const Input& in, double now)
          ty + std::round((th - LineHeight(kFontSmall)) * 0.5f), state, cfg.enabled ? White(1.0f) : Gray(130), S(2));
     if (g_panel.selected == kToggleItem)
         Marker(ty - S(2), th + S(4));
+    OfferHelp("Turns the whole mod on or off. Off gives you the game's normal camera.", py, toggleHot,
+              g_panel.selected == kToggleItem);
     y += headerH;
 
     // ---- Tabs ----
@@ -1054,6 +1219,7 @@ void BuildPanel(int screenHeight, const Input& in, double now)
             Rect(px + 1, y, panelW - 2, rowH, White(0.035f));
         if (focused)
             Marker(y + S(9), rowH - S(18));
+        OfferHelp(def.help, y, hot, focused);
         const float labelY = y + std::round((rowH - LineHeight(kFontBody)) * 0.5f);
 
         if (def.kind == RowKind::Slider) {
@@ -1091,6 +1257,26 @@ void BuildPanel(int screenHeight, const Input& in, double now)
             const char* onOff = flag ? "ON" : "OFF";
             Text(kFontSmall, x + innerW - sw - S(10) - TextWidth(kFontSmall, onOff, S(2)),
                  y + std::round((rowH - LineHeight(kFontSmall)) * 0.5f), onOff, flag ? valueColor : Gray(130), S(2));
+        } else if (def.kind == RowKind::Key) {  // the key's name in a box; click it, then press a key
+            const bool listening = g_panel.listening == i;
+            if (listening && in.pressed)  // a second click, here or anywhere else, cancels
+                g_panel.listening = -1;
+            else if ((hot && in.pressed) || (focused && in.activate))
+                StartListening(i);
+            const bool waiting = g_panel.listening == i;
+
+            const char* text = waiting ? "PRESS A KEY" : KeyName(cfg.*def.key);
+            const float boxH = S(26), boxPad = S(12), boxY = std::round(y + (rowH - boxH) * 0.5f);
+            const float boxW = TextWidth(kFontSmall, text, S(2)) + 2 * boxPad, bx = x + innerW - boxW;
+            if (waiting) {
+                RoundedRect(bx, boxY, boxW, boxH, boxH * 0.5f, White(1.0f));
+            } else {
+                RoundedRect(bx - 1, boxY - 1, boxW + 2, boxH + 2, boxH * 0.5f + 1, White(hot ? 0.5f : 0.22f));
+                RoundedRect(bx, boxY, boxW, boxH, boxH * 0.5f, kPanelSolid);
+            }
+            Text(kFontSmall, bx + boxPad, boxY + std::round((boxH - LineHeight(kFontSmall)) * 0.5f), text,
+                 waiting ? kPanelSolid : valueColor, S(2));
+            Text(kFontBody, x, labelY, def.label, labelColor, 0);
         } else {  // Choice: two segments, e.g. GAME | CUSTOM
             bool& flag = cfg.*def.flag;
             const char* options[2] = { def.offText, def.onText };
@@ -1149,8 +1335,9 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     y += S(18) + S(18);
 
     // ---- Buttons ----
-    const auto Button = [&](int buttonItem, float bx, float bw, const char* label, bool primary) {
+    const auto Button = [&](int buttonItem, float bx, float bw, const char* label, bool primary, const char* help) {
         const bool hot = in.Inside(bx, y, bw, buttonH);
+        OfferHelp(help, y, hot, g_panel.selected == buttonItem);
         if (hot && in.pressed) {
             g_panel.pressedItem = buttonItem;
             g_panel.selected = buttonItem;
@@ -1176,7 +1363,8 @@ void BuildPanel(int screenHeight, const Input& in, double now)
 
     const float gap = S(10);
     const float bw = std::floor((innerW - 2 * gap) / 3);
-    if (Button(saveItem, x, bw, g_panel.dirty ? "SAVE" : "SAVED", g_panel.dirty)) {
+    if (Button(saveItem, x, bw, g_panel.dirty ? "SAVE" : "SAVED", g_panel.dirty,
+               "Writes your settings to mxcam.ini so they load next time.")) {
         if (SaveConfig()) {
             g_panel.dirty = false;
             SetStatus("SAVED TO MXCAM.INI", now);
@@ -1184,18 +1372,22 @@ void BuildPanel(int screenHeight, const Input& in, double now)
             SetStatus("COULD NOT WRITE MXCAM.INI", now);
         }
     }
-    if (Button(defaultsItem, x + bw + gap, bw, "DEFAULTS", false)) {
+    if (Button(defaultsItem, x + bw + gap, bw, "DEFAULTS", false,
+               "Puts every camera setting back to its default (not the menu key). Press SAVE to keep it.")) {
         ResetTunables();
         camera::Reset();
         g_panel.dirty = true;
         SetStatus("DEFAULTS RESTORED - NOT SAVED YET", now);
     }
-    if (Button(closeItem, x + 2 * (bw + gap), innerW - 2 * (bw + gap), "CLOSE", false))
+    if (Button(closeItem, x + 2 * (bw + gap), innerW - 2 * (bw + gap), "CLOSE", false,
+               "Closes the panel. Unsaved changes stay until you quit the game."))
         g_panel.closeRequest = true;
     y += buttonH + S(16);
 
     // ---- Hint / status line ----
-    if (now < g_panel.statusUntil) {
+    if (g_panel.listening >= 0) {
+        Text(kFontSmall, x, y, "PRESS THE NEW MENU KEY   \xB7   ESC CANCELS", White(1.0f), S(1));
+    } else if (now < g_panel.statusUntil) {
         Text(kFontSmall, x, y, g_panel.status, White(1.0f), S(1));
     } else {
         char hint[128];
@@ -1203,10 +1395,36 @@ void BuildPanel(int screenHeight, const Input& in, double now)
         Text(kFontSmall, x, y, hint, Gray(105), S(1));
     }
 
+    // ---- Credit, bottom right ----
+    {
+        y += S(18);
+        const char* author = "By: Voaks";
+        const char* aside  = "(claude)";
+        const float asideW = TextWidth(kFontTiny, aside, 0), gapW = S(4);
+        const float authorX = x + innerW - asideW - gapW - TextWidth(kFontSmall, author, S(1));
+        Text(kFontSmall, authorX, y, author, Gray(130), S(1));
+        Text(kFontTiny, x + innerW - asideW, y + LineHeight(kFontSmall) - LineHeight(kFontTiny), aside, Gray(110), 0);
+    }
+
     if (in.released || !in.down) {
         g_panel.dragging = -1;
         if (in.released)
             g_panel.pressedItem = -1;
+    }
+
+    // ---- Help box beside the panel, level with its row ----
+    const HelpSpot& help = g_panel.helpForMouse ? hoveredHelp : selectedHelp;
+    if (help.text) {
+        const float boxW = S(300), padX = S(14), padY = S(10), lineH = LineHeight(kFontBody);
+        char lines[kMaxWrapLines][kWrapLineSize];
+        const int count = WrapText(kFontBody, help.text, boxW - 2 * padX, lines);
+        const float boxH = 2 * padY + count * lineH;
+        const float bx = px + panelW + S(12);
+        const float by = std::fmax(S(16), std::fmin(help.y, screenHeight - boxH - S(16)));
+        RoundedRect(bx - 1, by - 1, boxW + 2, boxH + 2, S(8) + 1, White(0.16f));
+        RoundedRect(bx, by, boxW, boxH, S(8), kPanelColor);
+        for (int i = 0; i < count; ++i)
+            Text(kFontBody, bx + padX, by + padY + i * lineH, lines[i], Gray(205), 0);
     }
 
     // Our own cursor (the system one is hidden over the game window while the panel is open).
@@ -1279,7 +1497,7 @@ void OverlayFrame(HDC dc)
         if (!window || !g_glAvailable || !((menuKey && focus) || testOpen))
             return;
         OpenPanel(window);
-    } else if (g_panel.closeRequest || (focus && (menuKey || escape))) {
+    } else if (g_panel.closeRequest || (focus && g_panel.listening < 0 && (menuKey || escape))) {
         ClosePanel();
         return;
     }
@@ -1290,7 +1508,16 @@ void OverlayFrame(HDC dc)
     if (!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0)
         return;
     const int width = client.right, height = client.bottom;
-    const Input in = ReadInput(window, focus, width, height, now);
+    Input in = ReadInput(window, focus, width, height, now);
+    if (g_panel.listening >= 0) {
+        // The next key press is the answer, not navigation.
+        if (focus)
+            ListenForKey(now);
+        else
+            g_panel.listening = -1;
+        in.nav = in.step = 0;
+        in.activate = false;
+    }
 
     // UI scale follows the window height (1080p = 1.0), in 5% steps so the atlas isn't rebuilt
     // for every pixel of a window resize.

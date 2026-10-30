@@ -72,7 +72,7 @@ void LoadConfig(const wchar_t* iniPath);
 void ReloadConfig();
 void SetEnabled(bool enabled);
 
-// Writes Enabled and the camera tunables back to mxcam.ini (comments and other keys are kept).
+// Writes Enabled, MenuKey and the camera tunables back to mxcam.ini (comments and other keys are kept).
 bool SaveConfig();
 // Puts the camera tunables back to their defaults; keys and detection settings are untouched.
 void ResetTunables();
