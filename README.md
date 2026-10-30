@@ -2,6 +2,8 @@
 
 MX Simulator Dynamic First Person Camera Mod
 
+https://www.youtube.com/watch?v=rlgx4rW7rfI
+
 
 **INSTRUCTIONS**
 
