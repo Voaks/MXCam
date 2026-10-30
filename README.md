@@ -50,7 +50,7 @@ modified game files before you race online with it.
 | F8  | Turn the effect on or off. Leave it off for third-person, replays and menus. |
 | F9  | Reload `mxcam.ini` without restarting the game. |
 | F10 | Dump every matrix call of the next frame to `mxcam.log`. |
-| F11 | Record 10 s of per-frame camera data to `mxcam_trace.csv` (`TraceKey`), for reporting jerks. |
+| F11 | Save the last 15 s (and the next 5 s) of per-frame camera data to `mxcam_trace.csv` (`TraceKey`): press it right after a jerk. |
 
 ## First run: finding the camera matrix
 
@@ -175,7 +175,7 @@ restores every piece of GL state it touches, and costs nothing while it's closed
 | `HeadForward` / `HeadHeight` | 0 / 0 | Eye offset in metres along the bike (game camera: its own axes). |
 | `HorizonLock` | 0.6 | 0 keeps the stock roll, 1 locks the horizon level. (Was `LeanCompensation`.) |
 | `PitchLock` | 0.5 | Share of the bike's pitch removed: wheelies, stoppies, jump faces. |
-| `WhipCentering` / `WhipFollow` / `WhipFreeAngleDeg` | 1 / 0.3 / 10 | In the air, keep the view on the direction of travel when the bike is whipped. |
+| `WhipCentering` / `WhipFollow` / `WhipFreeAngleDeg` | 1 / 0.3 / 10 | On jumps (after 0.4 s of free fall, so never for hops through a corner), keep the view on the direction of travel when the bike is whipped. The direction comes from the bike's own motion and is frozen at takeoff; only the nose's swing *after* takeoff counts as whip, so leaving a berm sideways or mid-slide doesn't pull the view. |
 | `LookSide*` / `LookBack*` | 0 | Custom camera: extra eye offsets while looking sideways or back. |
 | `VerticalResponse` / `MaxVerticalLag` | 20 /s / 0.05 | Low-pass filter on eye height. |
 | `CompressionPerG` | 0.012 | How far the neck sags per g of vertical acceleration. |

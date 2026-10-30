@@ -278,7 +278,7 @@ void PollHotkeys()
     if (dump)
         g_dumpRequested = true;
     if (trace)
-        StartTrace(10.0);
+        StartTrace(5.0);
 }
 
 void EndFrame()

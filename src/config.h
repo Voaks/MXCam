@@ -12,7 +12,7 @@ struct Config {
     int    reloadKey = 0x78;  // VK_F9
     int    dumpKey   = 0x79;  // VK_F10
     int    menuKey   = 0x45;  // 'E': in-game settings panel
-    int    traceKey  = 0x7A;  // VK_F11: record a 10 s per-frame trace
+    int    traceKey  = 0x7A;  // VK_F11: save the last 15 s (+5 s) of per-frame trace
 
     // [Detection]
     // Shader path (MX Simulator): matrices arrive as glUniformMatrix4fv uploads. Both names are

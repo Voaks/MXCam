@@ -370,6 +370,7 @@ void EndFrame(double contentTime, double frameDt)
         // Vertical acceleration of the bike itself (not of the sprung camera): a least-squares
         // fit over the last 0.15 s, which frame-timing jitter can't throw off.
         const Vec3 pos{ world[12], world[13], world[14] };
+        g_pose.worldPosition[0] = pos.x; g_pose.worldPosition[1] = pos.y; g_pose.worldPosition[2] = pos.z;
         if (locked->id != g_motionTrackId || !g_haveBikePos || Length(pos - g_bikePos) > cfg.teleportDistance) {
             g_motionTrackId = locked->id;
             g_bikeFit.Reset();
@@ -379,6 +380,7 @@ void EndFrame(double contentTime, double frameDt)
         const Vec3 worldUp{ cfg.worldUp[0], cfg.worldUp[1], cfg.worldUp[2] };
         g_pose.haveAccel = g_bikeFit.Estimate(0.15, velocity, accel);
         g_pose.verticalAccelG = g_pose.haveAccel ? Dot(accel, worldUp) / kGravity : 0.0;
+        g_pose.worldVelocity[0] = velocity.x; g_pose.worldVelocity[1] = velocity.y; g_pose.worldVelocity[2] = velocity.z;
         g_bikePos = pos;
         g_haveBikePos = true;
     } else if (!locked) {

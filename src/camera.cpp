@@ -96,11 +96,15 @@ struct State {
     Vec3   velocity;              // world-space velocity of the eye (units/s)
     Vec3   accel;                 // world-space acceleration of the eye (units/s^2)
     bool   haveTravel   = false;
-    Vec3   travelHeading;         // horizontal direction of travel (unit), held steady in the air
+    Vec3   travelHeading;         // horizontal direction of travel (unit), frozen at takeoff
     double travelSpeed  = 0;      // horizontal speed (units/s)
+    double takeoffSlip  = 0;      // nose vs. travel at takeoff (radians): bike nose, game camera
+    double takeoffSlipCamera = 0;
     double airborne     = 0;      // 0 on the ground .. 1 in the air (eased)
     bool   inAir        = false;
     double fallTime     = 0;      // seconds of continuous free fall
+    double whipWeight   = 0;      // 0..1 whip centering (eased; real jumps only)
+    double jumpMaxWhip  = 0;      // largest whip correction of the current jump (degrees)
     double lookSide     = 0;      // 0..1 how much the rider is looking sideways / back
     double lookBack     = 0;
     double smoothHeight = 0;      // low-passed eye height along WorldUp
@@ -144,7 +148,7 @@ Model     g_model;
 Frame     g_frame;
 Telemetry g_telemetry;
 MotionFit g_eyeFit;
-EventLog  g_cutLog, g_teleportLog;
+EventLog  g_cutLog, g_teleportLog, g_jumpLog;
 
 // Frame timing (FrameTick).
 double g_contentTime     = 0;      // the swap that started the frame being drawn, seconds
@@ -440,25 +444,31 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     // Whip centering: while airborne, turn the view from the bike's nose toward the direction of
     // travel. Inside WhipFreeAngle the view stays on the travel direction; past it the view
     // follows the extra swing. WhipFollow blends back toward the nose. The travel direction is
-    // held steady through the jump (FinishFrame), so the rider's body swinging during the whip
-    // can't make the view wobble.
-    const auto WhipCorrection = [&](Vec3 nose) {
+    // frozen at takeoff (FinishFrame), and the whip is measured from the angle the nose already
+    // had to it then: a bike leaving a berm sideways or mid-slide isn't whipped, and only what
+    // the rider does in the air is centered.
+    const auto WhipCorrection = [&](Vec3 nose, double& takeoffSlip) {
         if (!cfg.whipCentering || !s.haveTravel)
             return 0.0;
         const Vec3 travel = s.travelHeading;
-        const double w       = std::atan2(Dot(nose, Normalize(Cross(travel, worldUp))), Dot(nose, travel));
+        const double angle = std::atan2(Dot(nose, Normalize(Cross(travel, worldUp))), Dot(nose, travel));
+        if (s.fallTime == 0 && !s.inAir && s.airborne < 0.01)  // held until the landing has eased out
+            takeoffSlip =Clamp(angle, -45.0 * kDegToRad, 45.0 * kDegToRad);
+        double w = angle - takeoffSlip;
+        if (w > kPi)  w -= 2.0 * kPi;
+        if (w < -kPi) w += 2.0 * kPi;
         const double free    = cfg.whipFreeAngleDeg * kDegToRad;
         const double excess  = w > 0 ? std::fmax(0.0, w - free) : std::fmin(0.0, w + free);
         const double wanted  = excess + cfg.whipFollow * (w - excess);
         // Only in the air, at speed, and never for a bike going sideways or backwards.
-        const double weight  = s.airborne * SmoothStep(3.0, 6.0, s.travelSpeed) *
-                               (1.0 - SmoothStep(100.0 * kDegToRad, 130.0 * kDegToRad, std::fabs(w)));
+        const double weight  = s.whipWeight * SmoothStep(3.0, 6.0, s.travelSpeed) *
+                               (1.0 - SmoothStep(100.0 * kDegToRad, 130.0 * kDegToRad, std::fabs(angle)));
         return (wanted - w) * weight;
     };
 
     // Game camera: the game's view with the locks applied. (It is fixed to the bike, so its
     // own pitch away from rest is the bike's.) A look-left / right / back isn't a whip.
-    double whip = WhipCorrection(cameraAtt.heading) * (1.0 - SmoothStep(50.0, 75.0, absYawDeg));
+    double whip = WhipCorrection(cameraAtt.heading, s.takeoffSlipCamera) * (1.0 - SmoothStep(50.0, 75.0, absYawDeg));
     const double gamePitch = cameraAtt.pitch - cfg.pitchLock * cameraPitchExcess;
     const double gameRoll  = LockedRoll(cameraAtt, cfg.horizonLock, cfg);
     Quat target = Build(Turn(cameraAtt.heading, whip, worldUp), gamePitch, gameRoll, worldUp);
@@ -471,7 +481,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
         // The game's look keys turn the camera 90 / 180 degrees; smaller offsets (the game
         // camera's own wobble, whip or gimbal) are ignored.
         const double look = lookYaw * SmoothStep(50.0, 75.0, absYawDeg);
-        const double customWhip = WhipCorrection(bikeAtt.heading);
+        const double customWhip = WhipCorrection(bikeAtt.heading, s.takeoffSlip);
         const Quat custom = Build(Turn(bikeAtt.heading, customWhip, worldUp), pitch, roll, worldUp, look);
         target = Slerp(target, custom, m.customWeight);
         whip += (customWhip - whip) * m.customWeight;
@@ -635,24 +645,41 @@ bool FinishFrame(const double view[16], double correction[16])
     // Eases in over a few tenths of a second, and out twice as fast on landing.
     s.airborne += ((s.inAir ? 1.0 : 0.0) - s.airborne) * LowPassAlpha(s.inAir ? 4.0 : 8.0, dt);
 
-    // Direction of travel for whip centering: the average over the last quarter second on the
-    // ground, then held through the jump (nothing pushes the bike sideways in the air, and the
-    // rider's head swinging during a whip would otherwise swing it too).
-    Vec3 averageVelocity;
-    if (g_eyeFit.EstimateVelocity(0.25, averageVelocity)) {
-        const Vec3 horizontal = averageVelocity - worldUp * Dot(averageVelocity, worldUp);
+    // Whip centering only for real jumps: 0.4 s of free fall first. Hops off berm lips and rough
+    // ground through a corner are shorter, and there the rider is steering the bike, which the
+    // view must follow.
+    const bool bigAir = s.inAir && s.fallTime > 0.4;
+    s.whipWeight += ((bigAir ? 1.0 : 0.0) - s.whipWeight) * LowPassAlpha(bigAir ? 4.0 : 8.0, dt);
+    if (s.whipWeight > 0.01)
+        s.jumpMaxWhip = std::fmax(s.jumpMaxWhip, std::fabs(g_frame.telemetry.whipDeg));
+    if (!s.inAir && s.whipWeight < 0.01 && s.jumpMaxWhip > 0) {
+        LogEvent(g_jumpLog, "whip centering: jump over, the view was turned up to %.0f deg from the bike's nose", s.jumpMaxWhip);
+        s.jumpMaxWhip = 0;
+    }
+
+    // Direction of travel for whip centering, from the bike's own motion when the tracker has it
+    // (the camera swings with the rider's head, most of all through a whip). It follows the bike
+    // on the ground and is frozen from the first moment of free fall: nothing turns a bike's
+    // flight path in the air, so the heading it left the ground with is exact for the whole jump.
+    Vec3 travelVelocity;
+    bool haveTravelVelocity = false;
+    if (pose.tracked && pose.fresh && pose.haveAccel) {
+        travelVelocity = Vec3{ pose.worldVelocity[0], pose.worldVelocity[1], pose.worldVelocity[2] };
+        haveTravelVelocity = true;
+    } else {
+        haveTravelVelocity = g_eyeFit.EstimateVelocity(0.25, travelVelocity);
+    }
+    if (haveTravelVelocity) {
+        const Vec3 horizontal = travelVelocity - worldUp * Dot(travelVelocity, worldUp);
         const double speed = Length(horizontal);
         if (speed > 0.5) {
-            // In the air it only drifts slowly: enough to iron out the head swinging through a
-            // whip, never enough to hang on to an old direction for long.
-            const double rate = s.inAir ? 1.0 : 8.0;
             if (!s.haveTravel) {
                 s.travelHeading = horizontal / speed;
                 s.travelSpeed = speed;
                 s.haveTravel = true;
-            } else {
-                s.travelHeading = Normalize(s.travelHeading + (horizontal / speed - s.travelHeading) * LowPassAlpha(rate, dt));
-                s.travelSpeed += (speed - s.travelSpeed) * LowPassAlpha(rate, dt);
+            } else if (s.fallTime == 0 && !s.inAir) {
+                s.travelHeading = Normalize(s.travelHeading + (horizontal / speed - s.travelHeading) * LowPassAlpha(12.0, dt));
+                s.travelSpeed += (speed - s.travelSpeed) * LowPassAlpha(12.0, dt);
             }
         } else if (!s.inAir) {
             s.travelSpeed = speed;
@@ -723,6 +750,7 @@ void FrameTick()
     g_contentTime = now;
     SummarizeEvents(g_cutLog, "camera cuts");
     SummarizeEvents(g_teleportLog, "position cuts");
+    SummarizeEvents(g_jumpLog, "jumps with whip centering");
 }
 
 double ContentTime() { return g_contentTime; }

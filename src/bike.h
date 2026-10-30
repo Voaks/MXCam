@@ -39,8 +39,12 @@ struct Pose {
     // these don't move when the game's sprung camera wobbles against the bike.
     double worldForward[3] = { 0, 0, -1 };
     double worldUp[3]      = { 0, 1, 0 };
-    // The bike's own vertical acceleration along WorldUp, in g (free fall: -1).
+    // The bike model's origin in world space in the latest matched frame.
+    double worldPosition[3] = {};
+    // The bike's own velocity (units/s) and vertical acceleration along WorldUp, in g (free
+    // fall: -1). Unlike the camera's, they don't swing with the rider's head.
     bool   haveAccel      = false;
+    double worldVelocity[3] = {};
     double verticalAccelG = 0;
 };
 

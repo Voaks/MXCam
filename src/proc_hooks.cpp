@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <share.h>
 #include <string>
 #include <unordered_map>
@@ -97,11 +98,21 @@ ShaderCamera g_camera;
 // Rotation-only draws further than this from the last camera rotation are not the sky.
 constexpr double kMaxSkyAngleDeg = 45.0;
 
-// Per-frame trace (TraceKey).
-FILE*  g_trace       = nullptr;
-int    g_traceFrames = 0;
-double g_traceStart  = -1;
-double g_traceEnd    = 0;
+// Per-frame trace (TraceKey). Every frame goes into a ring buffer, so the key saves the seconds
+// *before* it was pressed (the moment something looked wrong) and then keeps recording a while.
+constexpr int    kTraceRing    = 4096;  // frames; covers kTraceHistory at up to ~270 fps
+constexpr double kTraceHistory = 15.0;  // seconds kept before the key press
+struct TraceLine {
+    double time = 0;
+    char   text[512];
+};
+TraceLine* g_traceRing   = nullptr;     // allocated on first use
+int    g_traceHead       = 0;
+int    g_traceCount      = 0;
+FILE*  g_trace           = nullptr;
+int    g_traceFrames     = 0;
+double g_traceStart      = -1;          // content time of the key press (-1: at the next frame)
+double g_traceEnd        = 0;
 
 unsigned long long UniformKey(GLuint program, GLint location)
 {
@@ -498,43 +509,67 @@ void StartTrace(double seconds)
     fprintf(g_trace, "time_ms,interval_ms,step_ms,sky_previews,other_rotations,cut,reset,bike,bike_fresh,custom,"
                      "raw_yaw,raw_pitch,raw_roll,bike_yaw,bike_pitch,bike_roll,view_yaw,view_pitch,view_roll,"
                      "lag_deg,look_yaw,whip_deg,air,fall_g,accel_up_g,neck_mm,"
-                     "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz\n");
+                     "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz,bike_x,bike_y,bike_z\n");
+    // Times are relative to the key press: the history before it is negative.
+    const double now = camera::ContentTime();
     g_traceFrames = 0;
-    g_traceStart  = -1;
-    g_traceEnd    = seconds;
-    Log("trace: recording %.0f s to %ls", seconds, path);
+    for (int i = g_traceCount; i > 0; --i) {
+        const TraceLine& line = g_traceRing[(g_traceHead - i + kTraceRing) % kTraceRing];
+        if (now - line.time > kTraceHistory)
+            continue;
+        fprintf(g_trace, "%.1f,%s", (line.time - now) * 1000.0, line.text);
+        ++g_traceFrames;
+    }
+    g_traceStart = now;
+    g_traceEnd   = seconds;
+    Log("trace: saved the last %.0f s, recording %.0f s more to %ls", kTraceHistory, seconds, path);
 }
 
 namespace {
 
-// One line per frame while a trace is recording.
+// One line per frame into the ring buffer, and into the file while a trace is recording.
 void TraceFrame(bool captured)
 {
+    if (!g_traceRing) {
+        g_traceRing = new (std::nothrow) TraceLine[kTraceRing];
+        if (!g_traceRing)
+            return;
+    }
     const double now = camera::ContentTime();
-    if (g_traceStart < 0)
-        g_traceStart = now;
+    TraceLine& line = g_traceRing[g_traceHead];
+    line.time = now;
+    g_traceHead = (g_traceHead + 1) % kTraceRing;
+    if (g_traceCount < kTraceRing)
+        ++g_traceCount;
+
+    const camera::Telemetry& t = camera::LastTelemetry();
+    const bike::Pose& pose = bike::Current();
+    if (!captured) {
+        snprintf(line.text, sizeof line.text, "no camera\n");
+    } else {
+        snprintf(line.text, sizeof line.text,
+            "%.2f,%.2f,%d,%d,%d,%d,%d,%d,%.2f,"
+            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+            "%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,"
+            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+            t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
+            t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
+            t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
+            t.lagDeg, t.lookYawDeg, t.whipDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
+            t.rawPos[0], t.rawPos[1], t.rawPos[2], t.eyeOffset[0], t.eyeOffset[1], t.eyeOffset[2],
+            pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2]);
+    }
+
+    if (!g_trace)
+        return;
     if (now - g_traceStart > g_traceEnd) {
         fclose(g_trace);
         g_trace = nullptr;
         Log("trace: %d frames written to mxcam_trace.csv", g_traceFrames);
         return;
     }
-    const camera::Telemetry& t = camera::LastTelemetry();
-    if (!captured) {
-        fprintf(g_trace, "%.1f,no camera\n", (now - g_traceStart) * 1000.0);
-        return;
-    }
+    fprintf(g_trace, "%.1f,%s", (now - g_traceStart) * 1000.0, line.text);
     ++g_traceFrames;
-    fprintf(g_trace,
-            "%.1f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%.2f,"
-            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-            "%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,"
-            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-            (now - g_traceStart) * 1000.0, t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
-            t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
-            t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
-            t.lagDeg, t.lookYawDeg, t.whipDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
-            t.rawPos[0], t.rawPos[1], t.rawPos[2], t.eyeOffset[0], t.eyeOffset[1], t.eyeOffset[2]);
 }
 
 }  // namespace
@@ -548,8 +583,7 @@ bool EndShaderFrame()
         Log("  shader path: camera %s, %d '%s' uploads corrected, %d sky preview(s), %d other rotation-only draw(s)",
             captured ? "found" : "NOT found", g_camera.correctedThisFrame, GetConfig().modelviewUniform,
             g_camera.previews, g_camera.otherRotations);
-    if (g_trace)
-        TraceFrame(captured);
+    TraceFrame(captured);
     camera::FrameTick();
 
     // No camera this frame (menu, replay, effect off): don't carry a stale correction into the
