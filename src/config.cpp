@@ -241,7 +241,7 @@ void ReloadConfig()
     c.pitchLock            = Clamp(c.pitchLock, 0.0, 1.0);
     c.maxRollCorrectionDeg = Clamp(c.maxRollCorrectionDeg, 0.0, 180.0);
     c.whipFollow           = Clamp(c.whipFollow, 0.0, 1.0);
-    c.whipFreeAngleDeg     = Clamp(c.whipFreeAngleDeg, 0.0, 90.0);
+    c.whipFreeAngleDeg     = Clamp(c.whipFreeAngleDeg, 0.0, 75.0);
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);

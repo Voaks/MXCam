@@ -682,7 +682,7 @@ const RowDef kRows[] = {
     // ---- WHIP & LOOK ----
     Toggle(1, "WHIP (IN THE AIR)", "Whip centering",   &Config::whipCentering),
     Slider(1, nullptr,          "Follow the nose",     &Config::whipFollow,       0.0,   1.0,  0.01, 100.0, 0, "%"),
-    Slider(1, nullptr,          "Free angle",          &Config::whipFreeAngleDeg, 0.0,   45.0, 1.0,  1.0,   0, "\xB0"),
+    Slider(1, nullptr,          "Free angle",          &Config::whipFreeAngleDeg, 0.0,   75.0, 1.0,  1.0,   0, "\xB0"),
     Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
     Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
     Slider(1, nullptr,          "Back: forward",       &Config::lookBackForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),

@@ -95,6 +95,35 @@ public:
         return true;
     }
 
+    // Average velocity over the last `window` seconds (straight-line fit). In the air the
+    // horizontal velocity is constant, so a long window gives a steady direction of travel.
+    bool EstimateVelocity(double window, Vec3& velocity) const
+    {
+        if (count_ < 2)
+            return false;
+        const double t0 = time_[head_];
+        const Vec3   p0 = pos_[head_];
+        double s0 = 0, s1 = 0, s2 = 0;
+        Vec3 r0, r1;
+        for (int k = 0; k < count_; ++k) {
+            const int i = (head_ - k + kMax) % kMax;
+            const double tau = time_[i] - t0;
+            if (-tau > window && k >= 2)
+                break;
+            const Vec3 y = pos_[i] - p0;
+            s0 += 1;
+            s1 += tau;
+            s2 += tau * tau;
+            r0 = r0 + y;
+            r1 = r1 + y * tau;
+        }
+        const double det = s0 * s2 - s1 * s1;
+        if (std::fabs(det) < 1e-12)
+            return false;
+        velocity = (r1 * s0 - r0 * s1) / det;
+        return true;
+    }
+
 private:
     static double Det3(const double m[3][3])
     {

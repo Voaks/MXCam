@@ -95,6 +95,9 @@ struct State {
     Vec3   prevPos;
     Vec3   velocity;              // world-space velocity of the eye (units/s)
     Vec3   accel;                 // world-space acceleration of the eye (units/s^2)
+    bool   haveTravel   = false;
+    Vec3   travelHeading;         // horizontal direction of travel (unit), held steady in the air
+    double travelSpeed  = 0;      // horizontal speed (units/s)
     double airborne     = 0;      // 0 on the ground .. 1 in the air (eased)
     bool   inAir        = false;
     double fallTime     = 0;      // seconds of continuous free fall
@@ -436,26 +439,26 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     // ---- 4. Target view -------------------------------------------------------------------
     // Whip centering: while airborne, turn the view from the bike's nose toward the direction of
     // travel. Inside WhipFreeAngle the view stays on the travel direction; past it the view
-    // follows the extra swing. WhipFollow blends back toward the nose.
+    // follows the extra swing. WhipFollow blends back toward the nose. The travel direction is
+    // held steady through the jump (FinishFrame), so the rider's body swinging during the whip
+    // can't make the view wobble.
     const auto WhipCorrection = [&](Vec3 nose) {
-        Vec3 travel = s.velocity - worldUp * Dot(s.velocity, worldUp);
-        const double speed = Length(travel);
-        if (!cfg.whipCentering || speed < 1e-3)
+        if (!cfg.whipCentering || !s.haveTravel)
             return 0.0;
-        travel = travel / speed;
+        const Vec3 travel = s.travelHeading;
         const double w       = std::atan2(Dot(nose, Normalize(Cross(travel, worldUp))), Dot(nose, travel));
         const double free    = cfg.whipFreeAngleDeg * kDegToRad;
         const double excess  = w > 0 ? std::fmax(0.0, w - free) : std::fmin(0.0, w + free);
         const double wanted  = excess + cfg.whipFollow * (w - excess);
-        // Only in the air, at speed, and never for a sideways look or a bike going backwards.
-        const double weight  = s.airborne * SmoothStep(3.0, 6.0, speed) *
-                               (1.0 - SmoothStep(60.0 * kDegToRad, 80.0 * kDegToRad, std::fabs(w)));
+        // Only in the air, at speed, and never for a bike going sideways or backwards.
+        const double weight  = s.airborne * SmoothStep(3.0, 6.0, s.travelSpeed) *
+                               (1.0 - SmoothStep(100.0 * kDegToRad, 130.0 * kDegToRad, std::fabs(w)));
         return (wanted - w) * weight;
     };
 
     // Game camera: the game's view with the locks applied. (It is fixed to the bike, so its
-    // own pitch away from rest is the bike's.)
-    double whip = WhipCorrection(cameraAtt.heading);
+    // own pitch away from rest is the bike's.) A look-left / right / back isn't a whip.
+    double whip = WhipCorrection(cameraAtt.heading) * (1.0 - SmoothStep(50.0, 75.0, absYawDeg));
     const double gamePitch = cameraAtt.pitch - cfg.pitchLock * cameraPitchExcess;
     const double gameRoll  = LockedRoll(cameraAtt, cfg.horizonLock, cfg);
     Quat target = Build(Turn(cameraAtt.heading, whip, worldUp), gamePitch, gameRoll, worldUp);
@@ -588,6 +591,7 @@ bool FinishFrame(const double view[16], double correction[16])
         s.prevPos      = rawPos;
         s.smoothHeight = Dot(rawPos, worldUp);
         g_eyeFit.Reset();
+        s.haveTravel = false;
         dt = 0;
     }
 
@@ -607,32 +611,60 @@ bool FinishFrame(const double view[16], double correction[16])
     const double verticalAccel = Dot(s.accel, worldUp);
 
     // Airborne: in the air everything is in free fall (-1 g); on the ground it hovers around 0 g.
-    // The bike's own acceleration is used when the tracker has it - the game camera is sprung
-    // and its bounces can briefly look like free fall. Free fall must also last 0.12 s, and
-    // only a clear return toward 0 g counts as landing.
+    // Both the eye and (when the tracker has it) the bike must be in free fall: either alone
+    // can fake it for a moment - the sprung game camera bouncing, or the bike flicking from one
+    // lean to the other through a corner. Free fall must also last a quarter second (a real
+    // jump lasts far longer), and only a clear return toward 0 g counts as landing.
     const bike::Pose& pose = bike::Current();
     double fallG = verticalAccel / kGravity;
-    if (pose.tracked && pose.haveAccel) {
-        fallG = pose.verticalAccelG;
-    } else {
+    {
         Vec3 unusedVelocity, slowAccel;
         if (g_eyeFit.Estimate(0.15, unusedVelocity, slowAccel))
             fallG = Dot(slowAccel, worldUp) / kGravity;
     }
-    if (fallG < -0.75) {
+    if (pose.tracked && pose.haveAccel)
+        fallG = std::fmax(fallG, pose.verticalAccelG);
+    if (fallG < -0.7) {
         s.fallTime += dt;
-        if (s.fallTime > 0.12)
+        if (s.fallTime > 0.25)
             s.inAir = true;
     } else if (fallG > -0.4) {
         s.fallTime = 0;
         s.inAir = false;
     }
-    s.airborne += ((s.inAir ? 1.0 : 0.0) - s.airborne) * LowPassAlpha(4.0, dt);
+    // Eases in over a few tenths of a second, and out twice as fast on landing.
+    s.airborne += ((s.inAir ? 1.0 : 0.0) - s.airborne) * LowPassAlpha(s.inAir ? 4.0 : 8.0, dt);
+
+    // Direction of travel for whip centering: the average over the last quarter second on the
+    // ground, then held through the jump (nothing pushes the bike sideways in the air, and the
+    // rider's head swinging during a whip would otherwise swing it too).
+    Vec3 averageVelocity;
+    if (g_eyeFit.EstimateVelocity(0.25, averageVelocity)) {
+        const Vec3 horizontal = averageVelocity - worldUp * Dot(averageVelocity, worldUp);
+        const double speed = Length(horizontal);
+        if (speed > 0.5) {
+            // In the air it only drifts slowly: enough to iron out the head swinging through a
+            // whip, never enough to hang on to an old direction for long.
+            const double rate = s.inAir ? 1.0 : 8.0;
+            if (!s.haveTravel) {
+                s.travelHeading = horizontal / speed;
+                s.travelSpeed = speed;
+                s.haveTravel = true;
+            } else {
+                s.travelHeading = Normalize(s.travelHeading + (horizontal / speed - s.travelHeading) * LowPassAlpha(rate, dt));
+                s.travelSpeed += (speed - s.travelSpeed) * LowPassAlpha(rate, dt);
+            }
+        } else if (!s.inAir) {
+            s.travelSpeed = speed;
+        }
+    }
 
     // ---- 7. Vertical damping & G-force neck compression ---------------------------------
     const double rawHeight = Dot(rawPos, worldUp);
     if (dt > 1e-5) {
-        StepNeck(s, verticalAccel, dt, cfg);
+        // The neck is loaded by the bike's acceleration when the tracker has it: the game's head
+        // animation (bobbing, swinging through a whip) isn't a G-force and would only shake it.
+        StepNeck(s, pose.tracked && pose.haveAccel ? pose.verticalAccelG * kGravity : verticalAccel, dt, cfg);
         // Low-pass the eye height itself to iron out head-bob jitter from the animation.
         s.smoothHeight += (rawHeight - s.smoothHeight) * LowPassAlpha(cfg.verticalResponse, dt);
     }

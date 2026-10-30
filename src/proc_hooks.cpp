@@ -201,6 +201,8 @@ void ConsiderSkyRotation(const double view[16])
     if (g_camera.capturedThisFrame || !g_camera.haveCorrection)
         return;
     const double angle = camera::AngleToLastCameraDeg(view);
+    if (g_camera.havePreview && std::fabs(angle - g_camera.skyAngle) < 0.01)
+        return;  // the same rotation again (u_envmat, then the sky): already previewed
     if (angle < 0 || angle > kMaxSkyAngleDeg || (g_camera.havePreview && angle >= g_camera.skyAngle)) {
         ++g_camera.otherRotations;
         DumpCall("^ rotation only, %.1f deg from the camera: not taken as the sky", angle);
