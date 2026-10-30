@@ -687,7 +687,7 @@ const RowDef kRows[] = {
     Slider(1, nullptr,          "Back: height",        &Config::lookBackHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true),
     // ---- NECK ----
     Slider(2, "SMOOTHING",      "Rotation response",   &Config::rotationResponse, 0.0,   40.0,  0.5,    1.0,    1, " /s", "Off"),
-    Slider(2, nullptr,          "Max lag",             &Config::maxLagDeg,        0.0,   30.0,  0.5,    1.0,    1, "\xB0"),
+    Slider(2, nullptr,          "Max lag",             &Config::maxLagDeg,        0.0,   90.0,  0.5,    1.0,    1, "\xB0"),
     Slider(2, "NECK & IMPACTS", "Landing compression", &Config::compressionPerG,  0.0,   0.05,  0.0005, 1000.0, 1, " mm/g", "Off"),
     Slider(2, nullptr,          "Max compression",     &Config::maxCompression,   0.0,   0.2,   0.001,  1000.0, 0, " mm"),
     Slider(2, nullptr,          "Neck stiffness",      &Config::springHz,         0.5,   10.0,  0.1,    1.0,    1, " Hz"),
