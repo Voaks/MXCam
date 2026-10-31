@@ -42,12 +42,20 @@ void ResetMap();
 // The width of the map from its heightmap, for before the game has drawn its far side.
 void SetMapSize(double size);
 
+// The heightmap's sample spacing (u_spacing). Patches are placed and sized in world units, a
+// whole power-of-two number of samples each, so the quadtree is kept in samples. Default 1.
+void SetGridUnit(double unit);
+
 // How many stitched-edge combinations have a known vertex array variant.
 int LearntEdgeMasks();
 
 // The cells that complete this pass for a camera at eye looking along forward (world space,
 // y up). Writes up to maxOut of them and returns how many.
 int Fill(const double eye[3], const double forward[3], Patch* out, int maxOut);
+
+// How the last Fill() went, for the trace and log: "ok", "limit" (maxOut reached), or why it
+// filled nothing ("no-map", "unaligned", "no-patches").
+const char* LastFillNote();
 
 }  // namespace terrain
 }  // namespace mxcam

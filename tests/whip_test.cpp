@@ -6,12 +6,13 @@
 //   Then a rut corner whose lean-in reads as free fall, a bump in a slight turn and a whoop
 //   hopped while sliding, none of which whip lock may hold. Gravity is 3 g throughout, as MX
 //   Simulator's airtime reads in the mod's units, and the whip is ridden again with the game
-//   showing a double physics step now and then. Runs in real time (the camera times frames
-//   with the clock), ~35 s.
+//   showing a double physics step now and then; a double out of a turn; and the d-pad looks.
+//   Runs in real time (the camera times frames with the clock), ~45 s.
 //
 //   Build: cl /EHsc /std:c++17 /W4 tests\whip_test.cpp src\camera.cpp src\bike.cpp src\config.cpp src\log.cpp user32.lib
 
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -398,6 +399,50 @@ double Double(double whipLock)
     return worst;
 }
 
+// D-pad look, riding straight: right, back, left, then ahead again, 0.6 s each. Returns how far
+// the view was from where each look should have it by the end of each.
+struct LookResult {
+    double right = 0, back = 0, left = 0, ahead = 0;  // view yaw vs the game camera at the end of each
+    double maxRoll = 0;                               // worst horizon tilt while looking
+};
+
+LookResult LookAround()
+{
+    Config& cfg = EditConfig();
+    cfg.customCamera = false;
+    cfg.whipLock = 1.0;
+    cfg.lookSideDeg = 90.0;
+    camera::Reset();
+    bike::Reset();
+
+    LookResult result;
+    constexpr double kStart = 1.0, kHold = 0.6;
+    const camera::Look looks[4] = { camera::Look::Right, camera::Look::Back, camera::Look::Left, camera::Look::Ahead };
+    double* const ends[4] = { &result.right, &result.back, &result.left, &result.ahead };
+    LARGE_INTEGER frequency, start, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (t > kStart + 4 * kHold)
+            break;
+        const int step = t < kStart ? -1 : std::min(int((t - kStart) / kHold), 3);
+        camera::SetLook(step < 0 ? camera::Look::Ahead : looks[step]);
+        const V bike{ kSpeed * t, 0, 0 };
+        const camera::Telemetry& tel = Draw(bike, bike + V{ 0, 1, 0 }, 0, 0, 0);
+        if (step >= 0) {
+            *ends[step] = Wrap(tel.outYaw - tel.rawYaw);
+            result.maxRoll = std::fmax(result.maxRoll, std::fabs(tel.outRoll));
+        }
+        if (g_verbose && step >= 0)
+            printf("    t=%.2f view-game yaw %+6.1f roll %+.1f\n", t, Wrap(tel.outYaw - tel.rawYaw), tel.outRoll);
+        Sleep(7);
+    }
+    camera::SetLook(camera::Look::Ahead);
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -443,6 +488,16 @@ int main(int argc, char** argv)
     const double doubleOn = Double(1.0);
     printf("  view up to %.1f deg off the direction of travel through the second jump\n", doubleOn);
     Check(doubleOn < 3, "whip lock holds the second jump's own direction, not the one before the turn");
+
+    printf("D-pad look: right, back, left, ahead, 0.6 s each\n");
+    const LookResult look = LookAround();
+    printf("  view vs ahead: right %+.1f, back %+.1f, left %+.1f, ahead %+.1f deg; horizon tilted up to %.1f deg\n",
+           look.right, look.back, look.left, look.ahead, look.maxRoll);
+    Check(std::fabs(look.right - 90) < 2, "d-pad right looks 90 deg to the right");
+    Check(std::fabs(std::fabs(look.back) - 180) < 2, "d-pad down looks behind");
+    Check(std::fabs(look.left + 90) < 2, "d-pad left looks 90 deg to the left");
+    Check(std::fabs(look.ahead) < 2, "releasing the d-pad looks ahead again");
+    Check(look.maxRoll < 1, "looking around keeps the horizon level");
     Check(!g_bikeLost, "the bike tracker had the bike throughout (the game's path was tested)");
     printf(g_failures ? "%d check(s) failed\n" : "All checks passed\n", g_failures);
     return g_failures ? 1 : 0;

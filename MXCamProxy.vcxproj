@@ -97,6 +97,7 @@
     <ClCompile Include="src\bike.cpp" />
     <ClCompile Include="src\camera.cpp" />
     <ClCompile Include="src\config.cpp" />
+    <ClCompile Include="src\gamepad.cpp" />
     <ClCompile Include="src\hooks.cpp" />
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\overlay.cpp" />
@@ -110,6 +111,7 @@
     <ClInclude Include="src\motion.h" />
     <ClInclude Include="src\camera.h" />
     <ClInclude Include="src\config.h" />
+    <ClInclude Include="src\gamepad.h" />
     <ClInclude Include="src\hooks.h" />
     <ClInclude Include="src\log.h" />
     <ClInclude Include="src\mathlib.h" />

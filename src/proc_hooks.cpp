@@ -45,6 +45,7 @@
 #include "bike.h"
 #include "camera.h"
 #include "config.h"
+#include "gamepad.h"
 #include "hooks.h"
 #include "log.h"
 #include "replay.h"
@@ -163,11 +164,24 @@ struct TerrainPass {
     bool   isTerrain     = false;          // the bound program draws the terrain in patches
     terrain::Patch current;                // the patch uniforms as last uploaded
     std::vector<GamePatch> patches;        // the game's patches so far this pass
-    bool   haveEye       = false;          // the chase camera this frame, for the fill
+    bool   haveEye       = false;          // the corrected camera this frame, for the fill
+    bool   lookingAway   = false;          // helmet cam turned far from where the game looks
     double eye[3]        = {};
     double forward[3]    = {};
 };
 TerrainPass g_terrain;
+
+// What the ground passes did this frame, for the trace and the log.
+struct GroundStats {
+    double      awayDeg  = -1;  // helmet cam vs the game camera, horizontally (-1: not measured)
+    int         passes   = 0;   // terrain passes finished
+    int         game     = 0;   // patches the game drew
+    int         filled   = 0;   // cells the fill drew
+    int         open     = 0;   // patches of a pass still open at the end of the frame (not filled)
+    const char* note     = "";  // how the last pass's fill went, or why it didn't run
+};
+GroundStats g_ground;
+bool        g_groundLogged = false;  // this look away has been logged
 GLuint g_mapProgram = 0;                                 // the terrain program the map was learnt from
 float  g_heightmapUpload[2][2] = {};                     // u_spacing, u_heights_dim_inv as last uploaded
 GLuint g_vao = 0;                                        // bound by glBindVertexArray
@@ -333,8 +347,8 @@ void ConsiderSkyRotation(const double view[16])
     }
 }
 
-// Where the chase camera is this frame, for the terrain fill: its view is C * the raw view.
-void NoteChaseCamera(const double view[16])
+// Where the corrected camera is this frame, for the terrain fill: its view is C * the raw view.
+void NoteCorrectedCamera(const double view[16])
 {
     double m[16];
     for (int c = 0; c < 4; ++c) {
@@ -350,6 +364,23 @@ void NoteChaseCamera(const double view[16])
         g_terrain.forward[c] = -m[c * 4 + 2];                                                  // -(row 2)
     }
     g_terrain.haveEye = true;
+}
+
+// The game culls the ground behind its own camera, so a helmet cam turned well away from it
+// (the d-pad looks) needs the terrain fill, as a replay does. A few degrees of whip lock or
+// air looseness stay well inside what the game draws.
+constexpr double kLookAwayFillDeg = 30.0;
+// The horizontal angle between the corrected camera and the game's (-1 when either looks
+// straight down).
+double LookAwayDeg(const double view[16])
+{
+    const double rawX = -view[2], rawZ = -view[10];  // the game camera's forward, horizontal
+    const double ourX = g_terrain.forward[0], ourZ = g_terrain.forward[2];
+    const double rawLength = std::sqrt(rawX * rawX + rawZ * rawZ), ourLength = std::sqrt(ourX * ourX + ourZ * ourZ);
+    if (rawLength < 1e-3 || ourLength < 1e-3)
+        return -1;
+    const double cosine = (rawX * ourX + rawZ * ourZ) / (rawLength * ourLength);
+    return std::acos(std::fmax(-1.0, std::fmin(1.0, cosine))) * 180.0 / 3.14159265358979;
 }
 
 // Returns the matrix to actually upload: value itself, or scratch holding C * value.
@@ -384,7 +415,7 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
                 bike::Reset();
             g_camera.haveCorrection = mode == replay::Mode::Chase;
             if (g_camera.haveCorrection)
-                NoteChaseCamera(view);
+                NoteCorrectedCamera(view);
             char text[256];
             replay::Describe(text, sizeof text);
             DumpCall("^ CAMERA  %s", text);
@@ -393,6 +424,9 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
             g_camera.haveCorrection = camera::Update(view, g_camera.correction) &&
                                       camera::RotationCorrection(g_camera.rotationOnly);
             if (g_camera.haveCorrection) {
+                NoteCorrectedCamera(view);
+                g_ground.awayDeg = LookAwayDeg(view);
+                g_terrain.lookingAway = g_ground.awayDeg > kLookAwayFillDeg;
                 const camera::Telemetry& t = camera::LastTelemetry();
                 DumpCall("^ CAMERA  dt=%.1fms lag=%.2fdeg roll=%.2fdeg rollCorr=%.2fdeg pitchExcess=%.1fdeg "
                          "viewPitch=%.1fdeg lookYaw=%.0fdeg airYaw=%.1fdeg air=%.2f bike=%s %s accelUp=%.2fg "
@@ -620,7 +654,9 @@ void NoteTerrainUniform(GLint location, GLsizei count, const GLfloat* value, int
             g_variants.clear();
             Log("terrain: %s = %g %g (a new heightmap)", location == u.spacing ? kSpacingUniform : kHeightsDimUniform,
                 value[0], second);
-            // Samples apart / 1 over samples across: the map's width.
+            // The patches are whole numbers of samples; samples apart / 1 over samples across: the
+            // map's width.
+            terrain::SetGridUnit(g_heightmapUpload[0][0]);
             if (g_heightmapUpload[0][0] > 0 && g_heightmapUpload[1][0] > 0)
                 terrain::SetMapSize(g_heightmapUpload[0][0] / g_heightmapUpload[1][0]);
         }
@@ -705,6 +741,7 @@ void FillTerrain()
         return;
 
     const int filled = terrain::Fill(g_terrain.eye, g_terrain.forward, g_filled, kMaxFilledPatches);
+    g_ground.note = terrain::LastFillNote();
     std::sort(g_filled, g_filled + filled,
               [](const terrain::Patch& a, const terrain::Patch& b) { return a.variant < b.variant; });
     const GLuint common = CommonVariant();
@@ -730,6 +767,7 @@ void FillTerrain()
         ++drawn;
         stitched += cell.edges != 0 && cell.variant >= 0 ? 1 : 0;
     }
+    g_ground.filled += drawn;
     if (drawn > 0)
         UploadPatch(g_terrain.current);
     if (bound != g_vao)
@@ -741,7 +779,7 @@ void FillTerrain()
 }
 
 // The game is done with the terrain program: the map learns from its patches, and in a 3rd
-// person replay the cells it culled are drawn.
+// person replay or a d-pad look the cells it culled are drawn.
 void FinishTerrainPass()
 {
     if (g_terrain.patches.empty())
@@ -761,10 +799,21 @@ void FinishTerrainPass()
         terrain::AddGamePatch(patch);
     }
 
-    if (g_variants.empty())
+    ++g_ground.passes;
+    g_ground.game += static_cast<int>(g_terrain.patches.size());
+    const bool wanted = replay::Current() == replay::Mode::Chase || g_terrain.lookingAway;
+    if (g_variants.empty()) {
+        g_ground.note = "no-variants";
         DumpCall("^ TERRAIN  can't be filled in (indices from client memory, or too many draw calls per patch)");
-    else if (GetConfig().enabled && g_terrain.haveEye && g_camera.haveCorrection && replay::Current() == replay::Mode::Chase)
+    } else if (!GetConfig().enabled || !g_camera.haveCorrection) {
+        g_ground.note = "off";
+    } else if (!g_terrain.haveEye) {
+        g_ground.note = "no-eye";
+    } else if (!wanted) {
+        g_ground.note = "ahead";
+    } else {
         FillTerrain();
+    }
     g_terrain.patches.clear();
 }
 
@@ -878,7 +927,8 @@ void StartTrace(double seconds)
     fprintf(g_trace, "time_ms,interval_ms,step_ms,sky_previews,other_rotations,cut,reset,bike,bike_fresh,custom,"
                      "raw_yaw,raw_pitch,raw_roll,bike_yaw,bike_pitch,bike_roll,view_yaw,view_pitch,view_roll,"
                      "lag_deg,look_yaw,air_yaw,air,fall_g,accel_up_g,neck_mm,"
-                     "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz,bike_x,bike_y,bike_z\n");
+                     "cam_x,cam_y,cam_z,eye_dx,eye_dy,eye_dz,bike_x,bike_y,bike_z,"
+                     "away_deg,ground_passes,ground_game,ground_filled,ground_open,ground_note\n");
     // Times are relative to the key press: the history before it is negative.
     const double now = camera::ContentTime();
     g_traceFrames = 0;
@@ -923,13 +973,16 @@ void TraceFrame(bool captured)
             "%.2f,%.2f,%d,%d,%d,%d,%d,%d,%.2f,"
             "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
             "%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,"
-            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+            "%.1f,%d,%d,%d,%d,%s\n",
             t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
             t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
             t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
             t.lagDeg, t.lookYawDeg, t.airYawDeg, t.airborne, t.fallG, t.verticalAccelG, t.neckOffset * 1000.0,
             t.rawPos[0], t.rawPos[1], t.rawPos[2], t.eyeOffset[0], t.eyeOffset[1], t.eyeOffset[2],
-            pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2]);
+            pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2],
+            g_ground.awayDeg, g_ground.passes, g_ground.game, g_ground.filled, g_ground.open,
+            g_ground.note[0] ? g_ground.note : "-");
     }
 
     if (!g_trace)
@@ -977,8 +1030,19 @@ void NoteDraw(const DrawCall& draw)
 bool EndShaderFrame()
 {
     // A terrain pass still open at the end of the frame isn't filled in, only forgotten.
+    g_ground.open = static_cast<int>(g_terrain.patches.size());
     g_terrain.patches.clear();
+    // Once per look away: what the ground fill did, so a plain log shows it.
+    if (g_terrain.lookingAway && !g_groundLogged) {
+        g_groundLogged = true;
+        Log("terrain: view %.0f deg from the game camera: %d pass(es), the game drew %d patches, %d filled in (%s), %d left open",
+            g_ground.awayDeg, g_ground.passes, g_ground.game, g_ground.filled, g_ground.note[0] ? g_ground.note : "-",
+            g_ground.open);
+    } else if (!g_terrain.lookingAway && g_ground.awayDeg >= 0) {
+        g_groundLogged = false;
+    }
     g_terrain.haveEye = false;
+    g_terrain.lookingAway = false;
     const bool captured = g_camera.capturedThisFrame;
     if (captured && replay::Current() == replay::Mode::Off)
         bike::EndFrame(camera::GameTime(), camera::FrameInterval());
@@ -987,8 +1051,18 @@ bool EndShaderFrame()
             captured ? "found" : "NOT found", g_camera.correctedThisFrame, GetConfig().modelviewUniform,
             g_camera.previews, g_camera.otherRotations);
     TraceFrame(captured);
+    g_ground = GroundStats{};
     replay::EndFrame(camera::ContentTime(), captured);
     camera::FrameTick();
+    // The game has no look keys: the controller's d-pad turns the head for the next frame.
+    camera::Look look = camera::Look::Ahead;
+    if (GetConfig().controllerLook) {
+        const gamepad::DPad pad = gamepad::Read();
+        look = pad.down ? camera::Look::Back
+             : pad.left != pad.right ? (pad.left ? camera::Look::Left : camera::Look::Right)
+             : camera::Look::Ahead;
+    }
+    camera::SetLook(look);
 
     // No camera this frame (menu, effect off): don't carry a stale correction into the
     // next frame's sky.

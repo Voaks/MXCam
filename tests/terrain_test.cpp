@@ -3,7 +3,10 @@
 //   as a balanced quadtree of patches, each with the vertex array variant that stitches its
 //   edges toward bigger neighbours, skipping the patches entirely behind the game camera.
 //
-//   Build: cl /EHsc /std:c++17 /W4 tests\terrain_test.cpp src\terrain.cpp
+//   The map is simulated in heightmap samples and handed over in world units, once with a
+//   sample spacing of 1 and once with a track's 0.5795.
+//
+//   Build: cl /EHsc /std:c++17 /W4 tests\terrain_test.cpp src\terrain.cpp src\log.cpp
 
 #include "../src/terrain.h"
 
@@ -20,6 +23,7 @@ constexpr int kMap = 2048, kMin = 32, kMax = 512;
 constexpr int kMinusX = 1, kPlusX = 2, kMinusZ = 4, kPlusZ = 8;
 constexpr int kVariantBase = 100;  // the simulated game's vertex array for edge mask m: 100 + m
 
+double g_spacing = 1;  // world units per heightmap sample
 int g_failures = 0;
 bool g_verbose = false;  // -v: the first problem of each kind per pass
 void Check(bool ok, const char* what)
@@ -107,9 +111,9 @@ Result Run(const Eye& gameEye, const double gameForward[3], const Eye& chase, co
             continue;
         }
         terrain::Patch patch;
-        patch.offset[0] = float(x);
-        patch.offset[1] = float(z);
-        patch.scale = float(size);
+        patch.offset[0] = float(x * g_spacing);
+        patch.offset[1] = float(z * g_spacing);
+        patch.scale = float(size * g_spacing);
         const int edges = GameEdges(x, z, size, gameEye);
         patch.variant = kVariantBase + edges;
         terrain::AddGamePatch(patch);
@@ -118,14 +122,15 @@ Result Run(const Eye& gameEye, const double gameForward[3], const Eye& chase, co
     }
 
     static terrain::Patch filled[1024];
-    const double eye[3] = { chase.x, chase.y, chase.z };
+    const double eye[3] = { chase.x * g_spacing, chase.y * g_spacing, chase.z * g_spacing };
     const int count = terrain::Fill(eye, chaseForward, filled, 1024);
     r.filled = count;
     // A filled cell's edges: those its variant actually stitches.
     std::vector<int> fillVariant;
+    const auto samples = [](float world) { return int(std::lround(world / g_spacing)); };
     for (int i = 0; i < count; ++i) {
         const int edges = filled[i].variant >= kVariantBase ? filled[i].variant - kVariantBase : 0;
-        squares.push_back({ int(filled[i].offset[0]), int(filled[i].offset[1]), int(filled[i].scale), edges, false });
+        squares.push_back({ samples(filled[i].offset[0]), samples(filled[i].offset[1]), samples(filled[i].scale), edges, false });
         fillVariant.push_back(filled[i].variant);
     }
 
@@ -210,13 +215,14 @@ Result Run(const Eye& gameEye, const double gameForward[3], const Eye& chase, co
     return r;
 }
 
-}  // namespace
-
-int main(int argc, char** argv)
+// Every scenario on a map whose heightmap samples are spacing world units apart.
+void RunAll(double spacing)
 {
-    g_verbose = argc > 1 && argv[1][0] == '-' && argv[1][1] == 'v';
-    printf("terrain fill against a simulated game\n");
-    terrain::SetMapSize(kMap);  // as the heightmap uniforms give it
+    g_spacing = spacing;
+    printf("terrain fill against a simulated game (%g world units per sample)\n", spacing);
+    terrain::ResetMap();
+    terrain::SetGridUnit(spacing);
+    terrain::SetMapSize(kMap * spacing);  // as the heightmap uniforms give it
     Result total;
     int scenarios = 0;
     for (int ride = 0; ride < 3; ++ride) {
@@ -261,6 +267,15 @@ int main(int argc, char** argv)
     Check(terrain::LearntEdgeMasks() >= 9, "every stitching combination of a balanced tree is learnt");
     Check(total.jumps == 0, "no filled cell meets one more than twice its size");
     Check(total.seams <= total.sharedEdges / 100, "the fill meets the game's patches and itself almost without seams");
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    g_verbose = argc > 1 && argv[1][0] == '-' && argv[1][1] == 'v';
+    RunAll(1.0);
+    RunAll(0.5795);  // a track's heightmap spacing
     printf(g_failures ? "%d check(s) failed\n" : "All checks passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -19,7 +19,7 @@ struct Telemetry {
     double rollCorrectionDeg = 0;  // final view roll minus the game camera's roll
     double pitchExcessDeg    = 0;  // bike pitch away from its resting pitch (wheelie > 0)
     double viewPitchDeg      = 0;  // final view pitch (+ = up)
-    double lookYawDeg        = 0;  // game camera vs bike heading (look left / right / back)
+    double lookYawDeg        = 0;  // looking left / right / back: the game camera vs the bike, plus the d-pad's head turn
     double airYawDeg         = 0;  // air looseness: turn applied to the view in the air
     double airborne          = 0;  // 0..1
     bool   bikeTracked       = false;
@@ -42,6 +42,11 @@ struct Telemetry {
 
 // Forget all filter history; the next Update() starts from the raw camera again.
 void Reset();
+
+// Where the rider is asked to look (the controller's d-pad; the game has no look keys). The
+// head turns there over ~0.2 s, on top of everything else. Set before each frame is drawn.
+enum class Look { Ahead, Left, Right, Back };
+void SetLook(Look look);
 
 // Called once per presented frame (at the buffer swap). Measures the frame interval; all
 // filters step by a smoothed version of it, so timing jitter can't make the view judder.

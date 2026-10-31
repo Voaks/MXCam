@@ -161,6 +161,7 @@ struct State {
     double fallTime     = 0;      // seconds of continuous free fall
     double lookSide     = 0;      // 0..1 how much the rider is looking sideways / back
     double lookBack     = 0;
+    double headTurn     = 0;      // d-pad look: the head's turn about WorldUp (rad, + = right, eased)
     double smoothHeight = 0;      // low-passed eye height along WorldUp
     double neckOffset   = 0;      // spring displacement along WorldUp (negative = compressed)
     double neckVelocity = 0;
@@ -204,6 +205,10 @@ Frame     g_frame;
 Telemetry g_telemetry;
 MotionFit g_eyeFit;
 EventLog  g_cutLog, g_teleportLog;
+
+// D-pad look (SetLook). Turning the head: 90 deg takes ~0.2 s.
+Look g_look = Look::Ahead;
+constexpr double kHeadTurnResponse = 12.0;  // 1/s
 
 // Frame timing (FrameTick).
 double g_contentTime     = 0;      // the swap that started the frame being drawn, seconds
@@ -438,6 +443,17 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     s.prevRawRot = rawRot;
     const bool snap = reset || cut;
 
+    // D-pad look: the head turns toward where it's asked to look. Back is reached over the
+    // shoulder it's already turned toward (the right one from straight ahead).
+    {
+        const double side = cfg.lookSideDeg * kDegToRad;
+        const double aim = g_look == Look::Left  ? -side
+                         : g_look == Look::Right ? side
+                         : g_look == Look::Back  ? (s.headTurn < 0 ? -kPi : kPi)
+                         : 0.0;
+        s.headTurn += (aim - s.headTurn) * (snap ? 1.0 : LowPassAlpha(kHeadTurnResponse, dt));
+    }
+
     const bool onGround = s.airborne < 0.3;
 
     // ---- 3. Attitude of the game camera and of the bike -----------------------------------
@@ -626,8 +642,9 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
 
     // Head position: along the bike (custom) or the game camera's own axes.
     const double lookAlpha = LowPassAlpha(10.0, dt);
-    const double sideTarget = haveBike ? SmoothStep(50.0, 75.0, absYawDeg) * (1.0 - SmoothStep(110.0, 150.0, absYawDeg)) : 0.0;
-    const double backTarget = haveBike ? SmoothStep(110.0, 150.0, absYawDeg) : 0.0;
+    const double headDeg = std::fmax(absYawDeg, std::fabs(s.headTurn) * kRadToDeg);
+    const double sideTarget = haveBike ? SmoothStep(50.0, 75.0, headDeg) * (1.0 - SmoothStep(110.0, 150.0, headDeg)) : 0.0;
+    const double backTarget = haveBike ? SmoothStep(110.0, 150.0, headDeg) : 0.0;
     s.lookSide += (sideTarget - s.lookSide) * (snap ? 1.0 : lookAlpha);
     s.lookBack += (backTarget - s.lookBack) * (snap ? 1.0 : lookAlpha);
     const double side = s.lookSide * m.customWeight, rear = s.lookBack * m.customWeight;
@@ -653,6 +670,11 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
         smooth = Slerp(target, smooth, maxLag / lag);
     Quat rot = smooth;
 
+    // The d-pad's head turn, about WorldUp so the horizon stays where the rest left it. After
+    // the smoothing, so the head turns at its own pace.
+    if (s.headTurn != 0)
+        rot = AxisAngle(worldUp, -s.headTurn) * rot;
+
     // Neck compression also nods the head forward a little (rotation about the camera's right
     // axis; a negative angle pitches down). Uses last frame's neck, so the orientation is
     // complete here - the sky, drawn before the camera position is known, gets all of it.
@@ -677,7 +699,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     tel.rollCorrectionDeg = (finalAtt.roll - cameraAtt.roll) * kRadToDeg;
     tel.pitchExcessDeg    = (m.customWeight > 0.5 ? bikePitchExcess : cameraPitchExcess) * kRadToDeg;
     tel.viewPitchDeg      = finalAtt.pitch * kRadToDeg;
-    tel.lookYawDeg        = lookYaw * kRadToDeg;
+    tel.lookYawDeg        = (lookYaw + s.headTurn) * kRadToDeg;
     tel.airYawDeg         = airYaw * kRadToDeg;
     tel.bikeTracked       = pose.tracked;
     tel.bikeFresh         = pose.tracked && pose.fresh;
@@ -907,6 +929,8 @@ void FrameTick()
     SummarizeEvents(g_cutLog, "camera cuts");
     SummarizeEvents(g_teleportLog, "position cuts");
 }
+
+void SetLook(Look look) { g_look = look; }
 
 double ContentTime() { return g_contentTime; }
 double GameTime() { return g_gameTime; }

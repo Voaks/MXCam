@@ -24,6 +24,7 @@
 #include "bike.h"
 #include "camera.h"
 #include "config.h"
+#include "gamepad.h"
 #include "hooks.h"
 #include "log.h"
 #include "mathlib.h"
@@ -747,7 +748,12 @@ const RowDef kRows[] = {
         .Help("In the air only: holds the view on your direction of travel, horizon level, at your "
               "normal look-down angle, while the bike swings, leans and tilts under it. 100% keeps "
               "it completely straight; it eases back onto the bike after landing."),
-    Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
+    Toggle(1, "LOOKING AROUND", "D-pad look",          &Config::controllerLook)
+        .Help("Look around with a controller's d-pad: left / right to look sideways, down to look "
+              "behind. Release to look ahead again."),
+    Slider(1, nullptr,          "Side look angle",     &Config::lookSideDeg,      30.0,   90.0, 1.0, 1.0,   0, "\xB0")
+        .Help("How far the head turns when looking left / right with the d-pad."),
+    Slider(1, nullptr,          "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
         .Help("Custom camera: moves your eyes forward (+) or back (-) while looking left / right."),
     Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
         .Help("Custom camera: moves your eyes up (+) or down (-) while looking left / right."),
@@ -1349,8 +1355,9 @@ void BuildPanel(int screenHeight, const Input& in, double now)
                      t.customActive ? "CUSTOM CAM" : (t.bikeTracked ? "BIKE FOUND" : "GAME CAM"),
                      t.pitchExcessDeg, std::fabs(t.rawRollDeg));
     } else if (g_panel.tab == 1) {
-        snprintf(readout, sizeof readout, "%s   SWING %+.0f\xB0   LOOK %+.0f\xB0",
-                 t.airborne > 0.5 ? "IN THE AIR" : "ON THE GROUND", t.airYawDeg, t.lookYawDeg);
+        snprintf(readout, sizeof readout, "%s  SWING %+.0f\xB0  LOOK %+.0f\xB0  %s",
+                 t.airborne > 0.5 ? "AIR" : "GROUND", t.airYawDeg, t.lookYawDeg,
+                 cfg.controllerLook ? gamepad::StatusText() : "D-PAD OFF");
     } else if (g_panel.tab == 2) {
         snprintf(readout, sizeof readout, "LAG %.1f\xB0   %.1f G   NECK %+.0f MM", t.lagDeg,
                  1.0 + t.verticalAccelG, t.neckOffset * 1000.0);

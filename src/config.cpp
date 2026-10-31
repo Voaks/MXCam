@@ -101,6 +101,8 @@ bool SaveConfig()
         { L"Leveling",  L"MaxRollCorrectionDeg", g_config.maxRollCorrectionDeg },
         { L"Air",       L"AirLooseness",         g_config.airLooseness },
         { L"Air",       L"WhipLock",             g_config.whipLock },
+        { L"Look",      L"ControllerLook",       g_config.controllerLook ? 1.0 : 0.0 },
+        { L"Look",      L"LookSideDeg",          g_config.lookSideDeg },
         { L"Look",      L"LookSideForward",      g_config.lookSideForward },
         { L"Look",      L"LookSideHeight",       g_config.lookSideHeight },
         { L"Look",      L"LookBackForward",      g_config.lookBackForward },
@@ -150,6 +152,8 @@ void ResetTunables()
     g_config.maxRollCorrectionDeg = defaults.maxRollCorrectionDeg;
     g_config.airLooseness         = defaults.airLooseness;
     g_config.whipLock             = defaults.whipLock;
+    g_config.controllerLook       = defaults.controllerLook;
+    g_config.lookSideDeg          = defaults.lookSideDeg;
     g_config.lookSideForward      = defaults.lookSideForward;
     g_config.lookSideHeight       = defaults.lookSideHeight;
     g_config.lookBackForward      = defaults.lookBackForward;
@@ -220,6 +224,8 @@ void ReloadConfig()
     c.airLooseness     = ReadDouble(L"Air", L"AirLooseness", c.airLooseness);
     c.whipLock         = ReadDouble(L"Air", L"WhipLock", c.whipLock);
 
+    c.controllerLook  = ReadInt(L"Look", L"ControllerLook", c.controllerLook) != 0;
+    c.lookSideDeg     = ReadDouble(L"Look", L"LookSideDeg", c.lookSideDeg);
     c.lookSideForward = ReadDouble(L"Look", L"LookSideForward", c.lookSideForward);
     c.lookSideHeight  = ReadDouble(L"Look", L"LookSideHeight", c.lookSideHeight);
     c.lookBackForward = ReadDouble(L"Look", L"LookBackForward", c.lookBackForward);
@@ -255,6 +261,7 @@ void ReloadConfig()
     c.maxRollCorrectionDeg = Clamp(c.maxRollCorrectionDeg, 0.0, 180.0);
     c.airLooseness         = Clamp(c.airLooseness, 0.0, 1.0);
     c.whipLock             = Clamp(c.whipLock, 0.0, 1.0);
+    c.lookSideDeg          = Clamp(c.lookSideDeg, 10.0, 90.0);
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);

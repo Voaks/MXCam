@@ -47,7 +47,10 @@ struct Config {
     double airLooseness     = 0.6;        // 0..1 how much of the nose's left / right swing in the air the view lets pass
     double whipLock         = 0.0;        // 0..1 in the air: hold the view on the direction of travel, level
 
-    // [Look] extra eye offsets while looking sideways / back (custom camera)
+    // [Look] the controller's d-pad looks left / right / back (the game has no look keys)
+    bool   controllerLook  = true;
+    double lookSideDeg     = 90.0;        // how far left / right looks turn the head
+    // extra eye offsets while looking sideways / back (custom camera)
     double lookSideForward = 0.0;
     double lookSideHeight  = 0.0;
     double lookBackForward = 0.0;

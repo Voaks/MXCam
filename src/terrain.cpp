@@ -12,6 +12,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "log.h"
+
 namespace mxcam {
 namespace terrain {
 namespace {
@@ -19,11 +21,13 @@ namespace {
 // A cell is split while the camera is closer to it than this many times its size. The game
 // splits by roughness as well as distance; this errs on the fine side.
 constexpr double kSplitDistance = 3.0;
-// Cells entirely this far behind the camera's horizontal plane are skipped. Generous, as
+// Cells entirely this far (world units) behind the camera's horizontal plane are skipped. Generous, as
 // heights aren't known and a camera looking down sees a little behind its own position.
 constexpr double kBehindMargin = 48.0;
 // Rounds of splitting filled cells next to much smaller ones.
 constexpr int kBalancePasses = 6;
+// How far (in samples) a patch corner or size may be off a whole number and still count as one.
+constexpr double kAlignTolerance = 1e-2;
 // The coverage grid has a square per smallest patch; maps needing more aren't stitched.
 constexpr long long kMaxGridSquares = 1 << 20;
 // A map size from the heightmap beyond this is taken for a misreading.
@@ -68,7 +72,9 @@ struct Map {
 };
 
 Map g_map;
-double g_mapSize = 0;                  // from the heightmap (0: unknown)
+double g_mapSize = 0;                  // from the heightmap, in samples (0: unknown)
+double g_unit = 1;                     // world units per sample: cells are in samples
+bool   g_unalignedLogged = false;      // the first patch off the grid has been reported
 std::vector<GameCell> g_passCells;     // drawn by the game this pass
 std::vector<Overlay>  g_passOverlays;
 std::vector<Overlay>  g_overlays;      // from the latest pass that had any
@@ -78,6 +84,7 @@ bool g_passUnaligned = false;
 std::unordered_set<uint64_t> g_drawn;    // cells the game drew
 std::unordered_set<uint64_t> g_parents;  // cells with a drawn cell somewhere inside
 std::vector<FillCell> g_fill;
+const char* g_fillNote = "";
 
 // Which cell covers each smallest square of the map: the game's, then the filled ones.
 struct Owner {
@@ -261,7 +268,7 @@ bool Behind(const Cell& cell, const Camera& camera)
         const double z = cell.z + (corner & 2 ? cell.size : 0) - camera.z;
         nearest = std::fmax(nearest, x * camera.forwardX + z * camera.forwardZ);
     }
-    return nearest < -kBehindMargin;
+    return nearest < -kBehindMargin / g_unit;
 }
 
 double Distance(const Cell& cell, const Camera& camera)
@@ -376,10 +383,17 @@ void BeginPass()
 
 void AddGamePatch(const Patch& patch)
 {
-    const Cell cell{ static_cast<int>(std::lround(patch.offset[0])), static_cast<int>(std::lround(patch.offset[1])),
-                     static_cast<int>(std::lround(patch.scale)) };
+    const double x = patch.offset[0] / g_unit, z = patch.offset[1] / g_unit, size = patch.scale / g_unit;
+    const Cell cell{ static_cast<int>(std::lround(x)), static_cast<int>(std::lround(z)),
+                     static_cast<int>(std::lround(size)) };
     if (!IsPowerOfTwo(cell.size) || cell.x < 0 || cell.z < 0 || cell.x % cell.size || cell.z % cell.size ||
-        std::fabs(patch.offset[0] - cell.x) > 1e-3 || std::fabs(patch.offset[1] - cell.z) > 1e-3) {
+        std::fabs(x - cell.x) > kAlignTolerance || std::fabs(z - cell.z) > kAlignTolerance ||
+        std::fabs(size - cell.size) > kAlignTolerance) {
+        if (!g_unalignedLogged) {
+            g_unalignedLogged = true;
+            Log("terrain: a patch off the quadtree grid (corner %g %g, size %g; %g world units per sample): "
+                "the ground can't be filled in on this map", patch.offset[0], patch.offset[1], patch.scale, g_unit);
+        }
         g_passUnaligned = true;
         return;
     }
@@ -396,9 +410,9 @@ void AddGamePatch(const Patch& patch)
 
     if (patch.texScale > 0) {
         Overlay overlay;
-        overlay.size = 1.0 / patch.texScale;
-        overlay.x = -patch.texOffset[0];
-        overlay.z = -patch.texOffset[1];
+        overlay.size = 1.0 / (patch.texScale * g_unit);
+        overlay.x = -patch.texOffset[0] / g_unit;
+        overlay.z = -patch.texOffset[1] / g_unit;
         overlay.texOffset[0] = patch.texOffset[0];
         overlay.texOffset[1] = patch.texOffset[1];
         overlay.texScale = patch.texScale;
@@ -415,11 +429,18 @@ void ResetMap()
 {
     g_map = Map{};
     g_overlays.clear();
+    g_unalignedLogged = false;
 }
 
 void SetMapSize(double size)
 {
-    g_mapSize = size > 0 && size <= kMaxMapSize ? size : 0;
+    const double samples = size / g_unit;
+    g_mapSize = samples > 0 && samples <= kMaxMapSize ? samples : 0;
+}
+
+void SetGridUnit(double unit)
+{
+    g_unit = unit > 1e-6 ? unit : 1;
 }
 
 int LearntEdgeMasks()
@@ -431,6 +452,7 @@ int Fill(const double eye[3], const double forward[3], Patch* out, int maxOut)
 {
     if (!g_passOverlays.empty())
         g_overlays = g_passOverlays;
+    g_fillNote = g_passUnaligned ? "unaligned" : !g_map.known ? "no-map" : g_passCells.empty() ? "no-patches" : "ok";
     if (!g_map.known || g_passUnaligned || g_passCells.empty() || maxOut <= 0)
         return 0;
     if (g_mapSize > 0) {
@@ -459,8 +481,8 @@ int Fill(const double eye[3], const double forward[3], Patch* out, int maxOut)
     }
 
     Camera camera;
-    camera.x = eye[0];
-    camera.z = eye[2];
+    camera.x = eye[0] / g_unit;
+    camera.z = eye[2] / g_unit;
     const double horizontal = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
     if (horizontal > 1e-3) {
         camera.forwardX = forward[0] / horizontal;
@@ -481,13 +503,15 @@ int Fill(const double eye[3], const double forward[3], Patch* out, int maxOut)
     }
 
     const int count = std::min(static_cast<int>(g_fill.size()), maxOut);
+    if (count >= maxOut)
+        g_fillNote = "limit";
     for (int i = 0; i < count; ++i) {
         const FillCell& f = g_fill[i];
         Patch& patch = out[i];
         patch = Patch{};
-        patch.offset[0] = static_cast<float>(f.cell.x);
-        patch.offset[1] = static_cast<float>(f.cell.z);
-        patch.scale = static_cast<float>(f.cell.size);
+        patch.offset[0] = static_cast<float>(f.cell.x * g_unit);
+        patch.offset[1] = static_cast<float>(f.cell.z * g_unit);
+        patch.scale = static_cast<float>(f.cell.size * g_unit);
         patch.texOffset[0] = f.texOffset[0];
         patch.texOffset[1] = f.texOffset[1];
         patch.texScale = f.texScale;
@@ -502,6 +526,8 @@ int Fill(const double eye[3], const double forward[3], Patch* out, int maxOut)
     }
     return count;
 }
+
+const char* LastFillNote() { return g_fillNote; }
 
 }  // namespace terrain
 }  // namespace mxcam
