@@ -52,6 +52,11 @@ void FrameTick();
 double ContentTime();
 double FrameInterval();
 
+// The game's clock as of the last Update(), in seconds: content time, except that a frame on
+// which the game showed more than one physics step counts for that many. Stamp motion samples
+// with it; it drifts from ContentTime(), so don't compare the two.
+double GameTime();
+
 // view: the game's raw world->eye matrix (column-major). Returns false - leaving the frame
 // untouched - if it isn't a rigid camera transform (e.g. the wrong load was picked).
 // Advances every filter by one frame.

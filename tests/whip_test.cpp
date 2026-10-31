@@ -3,8 +3,11 @@
 //   into a 1.3 s jump; just after the lip the bike swings 70 deg sideways, leans 60 deg and dips
 //   its nose, straightened before the
 //   landing. The game camera is fixed to the bike's head, so it swings and leans with it.
-//   Then a rut corner whose lean-in reads as free fall, which whip lock must not hold.
-//   Runs in real time (the camera times frames with the clock), about 15 s.
+//   Then a rut corner whose lean-in reads as free fall, a bump in a slight turn and a whoop
+//   hopped while sliding, none of which whip lock may hold. Gravity is 3 g throughout, as MX
+//   Simulator's airtime reads in the mod's units, and the whip is ridden again with the game
+//   showing a double physics step now and then. Runs in real time (the camera times frames
+//   with the clock), ~35 s.
 //
 //   Build: cl /EHsc /std:c++17 /W4 tests\whip_test.cpp src\camera.cpp src\bike.cpp src\config.cpp src\log.cpp user32.lib
 
@@ -26,6 +29,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 constexpr double kSpeed = 15.0, kJumpStart = 1.6, kAirTime = 1.3, kEnd = 3.8, kGravity = 9.81;
+constexpr double kAirG = 3.0 * kGravity;  // what the game's gravity reads as
 constexpr double kFace = 0.3;                         // s on the jump face
 constexpr double kWhipDelay = 0.1, kWhipTime = 1.05;  // thrown just after the lip, back before landing
 
@@ -98,16 +102,19 @@ const camera::Telemetry& Draw(V bike, V eye, double yaw, double pitch, double ro
     double correction[16];
     camera::Update(view, correction);
     bike::Observe(0, viewModel);
-    bike::EndFrame(camera::ContentTime(), camera::FrameInterval());
+    bike::EndFrame(camera::GameTime(), camera::FrameInterval());
     return camera::LastTelemetry();
 }
 
 struct Result {
     double maxYaw = 0, maxRoll = 0, maxPitch = 0;  // biggest departure in the air
     double landedYaw = 0;                           // view vs bike heading at the end
+    double airborneDrop = 0;                        // largest fall of the airborne estimate mid-air
 };
 
-Result Ride(double whipLock)
+// doubleSteps: like the game, show two physics steps on every 40th frame (one frame's worth of
+// motion more than the frame's own time).
+Result Ride(double whipLock, bool doubleSteps = false)
 {
     Config& cfg = EditConfig();
     cfg.customCamera = false;
@@ -116,25 +123,30 @@ Result Ride(double whipLock)
     bike::Reset();
 
     Result result;
-    double groundYaw = 0, groundPitch = 0;
+    double groundYaw = 0, groundPitch = 0, lastClock = 0, ahead = 0, lastAirborne = 0;
+    int frame = 0;
     LARGE_INTEGER frequency, start, now;
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&start);
     for (;;) {
         QueryPerformanceCounter(&now);
-        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
-        if (t > kEnd)
+        const double clock = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (clock > kEnd)
             break;
+        if (doubleSteps && ++frame % 40 == 0)
+            ahead += clock - lastClock;
+        lastClock = clock;
+        const double t = clock + ahead;  // the game's time
         // Up a jump face (vertical speed building over kFace), then free fall; the whip is thrown
         // just after the lip and straightened before the landing.
         const double air = t - kJumpStart;
         const bool inAir = air > 0 && air < kAirTime;
-        const double v0 = 0.5 * kGravity * kAirTime, faceStart = kJumpStart - kFace;
+        const double v0 = 0.5 * kAirG * kAirTime, faceStart = kJumpStart - kFace;
         double height = 0;
         if (t > faceStart && t <= kJumpStart)
             height = 0.5 * (v0 / kFace) * (t - faceStart) * (t - faceStart);
         else if (inAir)
-            height = 0.5 * v0 * kFace + v0 * air - 0.5 * kGravity * air * air;
+            height = 0.5 * v0 * kFace + v0 * air - 0.5 * kAirG * air * air;
         else if (air >= kAirTime)
             height = 0.5 * v0 * kFace;  // landed on a raised table
         const double whip = air - kWhipDelay;
@@ -146,7 +158,7 @@ Result Ride(double whipLock)
         View({ 0, 0, 0 }, yaw, pitch, roll, m);
         const V up{ m[1], m[5], m[9] };
         const camera::Telemetry& tel = Draw(bike, bike + up * 1.0, yaw, pitch, roll);
-        if (t > 0.6 && t < kJumpStart) {
+        if (t > 0.6 && t < kJumpStart - kFace) {  // level ground, before the face loads the neck
             groundYaw = tel.outYaw;
             groundPitch = tel.outPitch;
         }
@@ -157,6 +169,9 @@ Result Ride(double whipLock)
             result.maxYaw = std::fmax(result.maxYaw, std::fabs(Wrap(tel.outYaw - groundYaw)));
             result.maxRoll = std::fmax(result.maxRoll, std::fabs(tel.outRoll));
             result.maxPitch = std::fmax(result.maxPitch, std::fabs(tel.outPitch - groundPitch));
+            if (air > 0.6 && air < kAirTime - 0.05)
+                result.airborneDrop = std::fmax(result.airborneDrop, lastAirborne - tel.airborne);
+            lastAirborne = tel.airborne;
         }
         result.landedYaw = std::fabs(Wrap(tel.outYaw - tel.rawYaw));
         static double lastPrint = 0;
@@ -224,6 +239,108 @@ double Corner(double whipLock)
     return worst;
 }
 
+// A bump in a slight turn. A jump first lets the camera learn the game's gravity. Then, turning 10 deg/s leaned 15 deg, a bump drops the
+// bike at 1.2 g for 0.1 s - free fall to the takeoff detector, but far shallower than airtime.
+// Returns the furthest the view got from the game camera's heading around the bump.
+double Bump(double whipLock)
+{
+    Config& cfg = EditConfig();
+    cfg.customCamera = false;
+    cfg.whipLock = whipLock;
+    camera::Reset();
+    bike::Reset();
+
+    constexpr double kG = kAirG, kAir = 1.0, kLaunch = 1.6, kTurnStart = 3.2, kBump = 4.0, kEndBump = 5.0;
+    double worst = 0, lastT = 0, yaw = 0, height = 0, vy = 0, dip = 0;
+    V bike{ 0, 0, 0 };
+    LARGE_INTEGER frequency, start, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (t > kEndBump)
+            break;
+        const double dt = t - lastT;
+        lastT = t;
+        if (t > kLaunch && t < kLaunch + kAir) {
+            const double air = t - kLaunch;
+            height = 0.5 * kG * kAir * air - 0.5 * kG * air * air;
+        } else {
+            height = 0;
+        }
+        if (t > kTurnStart)
+            yaw += 10.0 * kPi / 180 * dt;
+        // The dip: down at 1.2 g for 0.1 s, then levelled out at 1.2 g, a little lower.
+        if (t > kBump && t < kBump + 0.2) {
+            vy += (t < kBump + 0.1 ? -1.2 : 1.2) * kGravity * dt;
+            dip += vy * dt;
+        }
+        bike = bike + V{ std::cos(yaw), 0, std::sin(yaw) } * (kSpeed * dt);
+        bike.y = height + dip;
+        const double roll = t > kTurnStart ? -15.0 * kPi / 180 : 0.0;
+        double m[16];
+        View({ 0, 0, 0 }, yaw, 0, roll, m);
+        const V up{ m[1], m[5], m[9] };
+        const camera::Telemetry& tel = Draw(bike, bike + up * 1.0, yaw, 0, roll);
+        if (t > kBump - 0.1 && t < kBump + 0.7) {
+            worst = std::fmax(worst, std::fabs(Wrap(tel.outYaw - tel.rawYaw)));
+            g_bikeLost |= !tel.bikeTracked;
+        }
+        static double lastPrint = 0;
+        if (g_verbose && whipLock > 0 && ((t > 1.5 && t < 2.8) || (t > kBump - 0.1 && t < kBump + 0.7)) && t - lastPrint > 0.04) {
+            lastPrint = t;
+            printf("    t=%.2f view-game yaw %+5.1f fall %+.2fg airborne %.2f\n", t, Wrap(tel.outYaw - tel.rawYaw), tel.fallG, tel.airborne);
+        }
+        Sleep(7);
+    }
+    return worst;
+}
+
+// A whoop: riding along +x with the bike slid 10 deg off its path (nose toward +z), it hops for
+// 0.4 s, the nose swinging back 7 deg in the air - real free fall, but no jump to whip.
+// Returns the furthest the view got from the game camera's heading around the hop.
+double Whoop(double whipLock)
+{
+    Config& cfg = EditConfig();
+    cfg.customCamera = false;
+    cfg.whipLock = whipLock;
+    camera::Reset();
+    bike::Reset();
+
+    constexpr double kAir = 0.4, kLaunch = 1.6, kSlide = 10.0 * kPi / 180, kSwing = -7.0 * kPi / 180;
+    double worst = 0;
+    LARGE_INTEGER frequency, start, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (t > kLaunch + 1.2)
+            break;
+        const double air = t - kLaunch;
+        const bool inAir = air > 0 && air < kAir;
+        const double height = inAir ? 0.5 * kAirG * kAir * air - 0.5 * kAirG * air * air : 0.0;
+        const double yaw = kSlide + kSwing * SmoothLean(air * 0.3 / kAir);
+        const V bike{ kSpeed * t, height, 0 };
+        double m[16];
+        View({ 0, 0, 0 }, yaw, 0, 0, m);
+        const V up{ m[1], m[5], m[9] };
+        const camera::Telemetry& tel = Draw(bike, bike + up * 1.0, yaw, 0, 0);
+        if (air > -0.1 && air < kAir + 0.5) {
+            worst = std::fmax(worst, std::fabs(Wrap(tel.outYaw - tel.rawYaw)));
+            g_bikeLost |= !tel.bikeTracked;
+        }
+        static double lastPrint = 0;
+        if (g_verbose && whipLock > 0 && air > -0.1 && air < kAir + 0.5 && t - lastPrint > 0.04) {
+            lastPrint = t;
+            printf("    t=%.2f view-game yaw %+5.1f fall %+.2fg airborne %.2f\n", t, Wrap(tel.outYaw - tel.rawYaw), tel.fallG, tel.airborne);
+        }
+        Sleep(7);
+    }
+    return worst;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -243,10 +360,27 @@ int main(int argc, char** argv)
     Check(on.maxPitch < 4, "with whip lock the view keeps its look-down angle");
     Check(on.landedYaw < 1, "after landing the view is back on the bike");
 
+    printf("Whip again, the game showing two physics steps on every 40th frame\n");
+    const Result stepped = Ride(1.0, true);
+    printf("  view turned up to %.1f deg, pitched %.1f deg; airborne estimate fell by up to %.2f mid-air\n",
+           stepped.maxYaw, stepped.maxPitch, stepped.airborneDrop);
+    Check(stepped.airborneDrop < 0.01, "a double step doesn't read as a landing");
+    Check(stepped.maxYaw < 5, "with double steps whip lock still holds the direction of travel");
+
     printf("Rut: laid over 80 deg, turning 90 deg/s, eye dropping like free fall for 0.6 s\n");
     const double cornerOff = Corner(0.0), cornerOn = Corner(1.0);
     printf("  view up to %.1f deg off the bike's heading without whip lock, %.1f deg with it\n", cornerOff, cornerOn);
     Check(cornerOn < cornerOff + 3, "whip lock doesn't hold the view while cornering");
+
+    printf("Bump: turning 10 deg/s, a 0.1 s dip at 1.2 g (airtime reads 3 g)\n");
+    const double bumpOff = Bump(0.0), bumpOn = Bump(1.0);
+    printf("  view up to %.1f deg off the game camera's heading without whip lock, %.1f deg with it\n", bumpOff, bumpOn);
+    Check(bumpOn < bumpOff + 0.5, "whip lock ignores a bump in a slight turn");
+
+    printf("Whoop: a 0.4 s hop sliding 10 deg off the path, the nose swinging back 7 deg\n");
+    const double whoopOff = Whoop(0.0), whoopOn = Whoop(1.0);
+    printf("  view up to %.1f deg off the game camera's heading without whip lock, %.1f deg with it\n", whoopOff, whoopOn);
+    Check(whoopOn < whoopOff + 0.5, "whip lock ignores a whoop");
     Check(!g_bikeLost, "the bike tracker had the bike throughout (the game's path was tested)");
     printf(g_failures ? "%d check(s) failed\n" : "All checks passed\n", g_failures);
     return g_failures ? 1 : 0;

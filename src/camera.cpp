@@ -97,13 +97,31 @@ constexpr double kSwingTime = 0.5;
 // and bike as it leans in, which reads as free fall (85 deg of lean, 100 deg/s, seen in a
 // trace). Real jumps in the same trace stayed under 26 deg/s, whips included.
 constexpr double kAirTurnRateDeg = 40.0;
+// Whip lock is stricter, since it takes the view off the bike: the bike's path must be nearly
+// straight (a downhill corner read as 0.25 s of free fall while turning 63 deg/s, but only
+// crossed kAirTurnRateDeg after the lock had snatched the view; jumps stayed under 6 deg/s).
+// Measured from the eye, a whip's head swing alone can read 26 deg/s, so the air limit then.
+constexpr double kWhipTurnRateDeg = 20.0;
+// ...and free fall must read at least this fraction of what it reads in the air. MX Simulator's
+// airtime reads about -3 g in this mod's units; a bump in a slight turn read -0.9 g for 65 ms
+// and snatched the view, while every real takeoff passed -1.5 g within 10 ms.
+constexpr double kWhipFallFraction = 0.5;
+// ...and only for a real jump. Whoops and rollers leave the ground too, for 0.2-0.6 s, reading
+// as deep as airtime; locking the view there swings it from the bike's nose to its path (they
+// differ by the slide through the section) and back on landing. The size of a jump is set at
+// the lip: the airtime its launch speed carries on flat ground. In traces whoops launched for
+// at most 0.5 s of that, real jumps for 0.8 s or more. A jump that launches flat and drops away
+// (a step-down) still gets the lock once it has really been in the air this long.
+constexpr double kWhipAirtimeMin  = 0.6, kWhipAirtimeFull  = 0.8;  // s, launch airtime
+constexpr double kWhipFallTimeMin = 0.8, kWhipFallTimeFull = 1.2;  // s, time in the air
 
 // Whip lock takes the direction of travel from this long before free fall is detected.
 constexpr double kTravelHoldBack = 0.25;  // s
 constexpr int    kTravelSamples  = 128;   // frames of history: covers it up to ~500 fps
 struct TravelSample {
     Vec3   direction;
-    double dt = 0;
+    double rise = 0;  // upward speed (units/s)
+    double dt   = 0;
 };
 
 struct State {
@@ -121,9 +139,12 @@ struct State {
     int    travelNext   = 0;
     int    travelCount  = 0;
     bool   wasFalling   = false;
-    double outOfFallTime = 0;     // in the air: how long the eye has read out of free fall
+    double launchRise   = 0;      // upward speed at the lip of this fall (units/s, whip lock)
+    double outOfFallTime = 0;    // in the air: how long the eye has read out of free fall
     Vec3   motionHeading;         // horizontal direction of the eye's velocity, last frame
     double turnRate     = 0;      // how fast that direction turns (rad/s, filtered)
+    bool   turnFromBike = false;  // turnRate is measured from the bike's path (else the eye's)
+    bool   deepFall     = false;  // this fall has read as deep as real airtime (whip lock)
     double whip         = 0;      // 0..1 how far whip lock has taken over (eased)
     double airborne     = 0;      // 0 on the ground .. 1 in the air (eased)
     bool   inAir        = false;
@@ -143,6 +164,7 @@ struct Model {
     RestEstimator gameAngleRest;    // game camera pitch relative to the bike: the game's 1st-person angle
     Vec3          lastHeading{ 0, 0, -1 };
     double        customWeight = 0; // 0 = game camera .. 1 = custom camera, eased on switches
+    double        airG = -3.0;      // what free fall reads well into a jump (g), learned; MX Simulator's to start
     bike::Pose    lastPose;         // last pose the tracker reported, used while easing out
     bool          haveLastPose = false;
 };
@@ -180,6 +202,15 @@ bool   g_haveInterval    = false;
 double g_lastCommitTime  = -1;     // content time of the last Update()
 double g_lastCommitWallTime = 0;   // when it ran, to notice pauses (loading, alt-tab)
 double g_rawIntervalMs   = 0;
+
+// The game's own clock (FinishFrame), which the motion fits are stamped with. The game steps its
+// physics in fixed increments and now and then shows two (or three) steps in one frame - one
+// frame in 40 at 125 fps in a trace - which the swap times can't see. Stamped with the swap
+// time, such a frame read as a 6 g jolt and then a false landing, worst falling fast at the end
+// of a big jump: whip lock let go and grabbed again, and the neck bounced.
+double g_gameTime        = 0;
+double g_lastMotionTime  = -1;     // content time of the last FinishFrame()
+constexpr double kMinStepTravel = 0.03;  // units per frame below which steps aren't counted
 
 double NowSeconds()
 {
@@ -522,27 +553,39 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
         const Vec3 direction = speed > 3.0 ? horizontal / speed
                              : Length(viewHorizontal) > 0.05 ? Normalize(viewHorizontal) : cameraAtt.heading;
         const bool falling = s.fallTime > 0 || s.inAir;
+        const Vec3 bikeVelocity{ pose.velocity[0], pose.velocity[1], pose.velocity[2] };
+        const double rise = Dot(pose.tracked && pose.haveAccel ? bikeVelocity : s.velocity, worldUp);
         if (snap || Length(s.travel) < 0.5) {
             s.travel = direction;
             s.travelCount = 0;
         }
         if (!falling) {
             s.travel = Normalize(s.travel + (direction - s.travel) * LowPassAlpha(5.0, dt));
-            s.travelHistory[s.travelNext] = { s.travel, dt };
+            s.travelHistory[s.travelNext] = { s.travel, rise, dt };
             s.travelNext = (s.travelNext + 1) % kTravelSamples;
             s.travelCount = s.travelCount < kTravelSamples ? s.travelCount + 1 : kTravelSamples;
         } else if (!s.wasFalling) {
+            // Free fall is detected a little after the lip, so the launch speed is the fastest
+            // rise over the same stretch the direction is taken from.
+            s.launchRise = rise;
             double age = 0;
             for (int i = 1; i <= s.travelCount && age < kTravelHoldBack; ++i) {
                 const TravelSample& sample = s.travelHistory[(s.travelNext - i + kTravelSamples) % kTravelSamples];
                 s.travel = sample.direction;
+                s.launchRise = std::fmax(s.launchRise, sample.rise);
                 age += sample.dt;
             }
         }
         s.wasFalling = falling;
-        // Engages within ~0.1 s of the first moment of free fall (the airborne estimate takes too
-        // long for a whip thrown at the lip) and lets go over ~0.3 s after landing.
-        s.whip += ((falling ? 1.0 : 0.0) - s.whip) * LowPassAlpha(falling ? 25.0 : 6.0, dt);
+        // Engages within ~0.1 s of the first moment of deep free fall (the airborne estimate takes
+        // too long for a whip thrown at the lip), only while the bike's path runs straight, as far
+        // as the jump is big enough for it, and lets go over ~0.3 s after landing.
+        const double maxTurn = (s.turnFromBike ? kWhipTurnRateDeg : kAirTurnRateDeg) * kDegToRad;
+        const bool engage = falling && s.deepFall && s.turnRate < maxTurn;
+        const double launchAirtime = 2.0 * std::fmax(s.launchRise, 0.0) / (std::fabs(m.airG) * kGravity);
+        const double jumpSize = std::fmax(SmoothStep(kWhipAirtimeMin, kWhipAirtimeFull, launchAirtime),
+                                          SmoothStep(kWhipFallTimeMin, kWhipFallTimeFull, s.fallTime));
+        s.whip += ((engage ? jumpSize : 0.0) - s.whip) * LowPassAlpha(engage ? 25.0 : 6.0, dt);
     }
     const double whipWeight = cfg.whipLock * s.whip;
     if (whipWeight > 1e-3) {
@@ -672,9 +715,24 @@ bool FinishFrame(const double view[16], double correction[16])
     }
 
     // ---- 6. Motion: velocity, acceleration, airborne ------------------------------------
-    // A least-squares fit over the last ~0.1 s (AccelFilterHz), stamped with the frame's own
-    // time: frame-to-frame timing noise averages out instead of being differentiated twice.
-    g_eyeFit.Add(g_contentTime, rawPos);
+    // How many physics steps the game moved on this frame: at speed the camera covers a whole
+    // multiple of an ordinary frame's distance. Only counted on an ordinary frame interval, so a
+    // hitch or a pause just advances the clock by the time that passed.
+    const double wallDt = g_lastMotionTime >= 0 ? std::fmax(g_contentTime - g_lastMotionTime, 0.0) : 0.0;
+    g_lastMotionTime = g_contentTime;
+    int steps = 1;
+    const double expectedTravel = Length(s.velocity) * wallDt;
+    if (wallDt < 1.5 * g_frameInterval && expectedTravel > kMinStepTravel) {
+        const double ratio = Length(rawPos - s.prevPos) / expectedTravel;
+        const int n = int(std::floor(ratio + 0.5));
+        if (n >= 2 && n <= 3 && std::fabs(ratio - n) < 0.25)
+            steps = n;
+    }
+    g_gameTime += wallDt * steps;
+
+    // A least-squares fit over the last ~0.1 s (AccelFilterHz), stamped with the game's clock:
+    // frame-to-frame timing noise averages out instead of being differentiated twice.
+    g_eyeFit.Add(g_gameTime, rawPos);
     const double window = Clamp(cfg.accelFilterHz > 0 ? 1.2 / cfg.accelFilterHz : 0.1, 0.04, 0.3);
     Vec3 velocity, accel;
     if (g_eyeFit.Estimate(window, velocity, accel)) {
@@ -705,6 +763,7 @@ bool FinishFrame(const double view[16], double correction[16])
             s.motionHeading = Vec3{};
         }
         s.turnRate += (rate - s.turnRate) * LowPassAlpha(10.0, dt);
+        s.turnFromBike = bikeAccel;
     }
     const bool turning = s.turnRate > kAirTurnRateDeg * kDegToRad;
 
@@ -745,6 +804,13 @@ bool FinishFrame(const double view[16], double correction[16])
             s.fallTime += dt;
         }
     }
+    // How deep free fall reads well into a jump: the game's gravity in this mod's units.
+    if (s.inAir && s.fallTime > 0.4)
+        g_model.airG = Clamp(g_model.airG + (fallG - g_model.airG) * LowPassAlpha(2.0, dt), -6.0, -0.8);
+    if (s.fallTime <= 0 && !s.inAir)
+        s.deepFall = false;
+    else if (fallG < kWhipFallFraction * g_model.airG)
+        s.deepFall = true;
     // Eases in over a few tenths of a second, and out twice as fast on landing.
     s.airborne += ((s.inAir ? 1.0 : 0.0) - s.airborne) * LowPassAlpha(s.inAir ? 4.0 : 8.0, dt);
 
@@ -815,6 +881,7 @@ void FrameTick()
 }
 
 double ContentTime() { return g_contentTime; }
+double GameTime() { return g_gameTime; }
 double FrameInterval() { return g_frameInterval; }
 
 bool PreviewRotation(const double view[16], double out[16])

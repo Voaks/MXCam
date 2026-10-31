@@ -981,7 +981,7 @@ bool EndShaderFrame()
     g_terrain.haveEye = false;
     const bool captured = g_camera.capturedThisFrame;
     if (captured && replay::Current() == replay::Mode::Off)
-        bike::EndFrame(camera::ContentTime(), camera::FrameInterval());
+        bike::EndFrame(camera::GameTime(), camera::FrameInterval());
     if (IsDumping())
         Log("  shader path: camera %s, %d '%s' uploads corrected, %d sky preview(s), %d other rotation-only draw(s)",
             captured ? "found" : "NOT found", g_camera.correctedThisFrame, GetConfig().modelviewUniform,

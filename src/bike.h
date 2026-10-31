@@ -21,8 +21,9 @@ void BeginFrame(const double view[16]);
 void Observe(unsigned program, const float viewModel[16]);
 
 // Called once per frame after drawing. Matches this frame's objects against the tracks.
-// contentTime: the time this frame's content belongs to (s); frameDt: the smoothed frame interval.
-void EndFrame(double contentTime, double frameDt);
+// gameTime: the game's clock for this frame's content (s, camera::GameTime()); frameDt: the
+// smoothed frame interval.
+void EndFrame(double gameTime, double frameDt);
 
 // Forget every track (e.g. when the effect is switched off).
 void Reset();

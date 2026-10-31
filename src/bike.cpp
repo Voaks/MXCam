@@ -230,7 +230,7 @@ void Observe(unsigned program, const float viewModel[16])
     g_candidates.push_back(c);
 }
 
-void EndFrame(double contentTime, double frameDt)
+void EndFrame(double gameTime, double frameDt)
 {
     if (!g_frameOpen)
         return;
@@ -368,14 +368,14 @@ void EndFrame(double contentTime, double frameDt)
         g_pose.fresh = true;
 
         // Vertical acceleration of the bike itself (not of the sprung camera): a least-squares
-        // fit over the last 0.15 s, which frame-timing jitter can't throw off.
+        // fit over the last 0.15 s on the game's clock, which frame-timing jitter can't throw off.
         const Vec3 pos{ world[12], world[13], world[14] };
         g_pose.worldPosition[0] = pos.x; g_pose.worldPosition[1] = pos.y; g_pose.worldPosition[2] = pos.z;
         if (locked->id != g_motionTrackId || !g_haveBikePos || Length(pos - g_bikePos) > cfg.teleportDistance) {
             g_motionTrackId = locked->id;
             g_bikeFit.Reset();
         }
-        g_bikeFit.Add(contentTime, pos);
+        g_bikeFit.Add(gameTime, pos);
         Vec3 velocity, accel;
         const Vec3 worldUp{ cfg.worldUp[0], cfg.worldUp[1], cfg.worldUp[2] };
         g_pose.haveAccel = g_bikeFit.Estimate(0.15, velocity, accel);
