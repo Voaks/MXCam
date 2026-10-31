@@ -341,6 +341,63 @@ double Whoop(double whipLock)
     return worst;
 }
 
+// A double out of a corner: a 1 s jump flying along +x, then, 0.05 s after landing, a 20 deg
+// turn at 60 deg/s and a second 1 s jump 0.45 s after the first landing, flown straight along
+// the new heading (seen in a trace: whip lock held the second jump 18 deg off its path, along
+// the direction from before the turn, and swung back on landing). Returns the furthest the view
+// got from the direction of travel through the second jump.
+double Double(double whipLock)
+{
+    Config& cfg = EditConfig();
+    cfg.customCamera = false;
+    cfg.whipLock = whipLock;
+    camera::Reset();
+    bike::Reset();
+
+    constexpr double kAir = 1.0, kLaunch1 = 1.6, kLaunch2 = kLaunch1 + kAir + 0.45;
+    constexpr double kTurnStart = kLaunch1 + kAir + 0.05, kTurnTime = 1.0 / 3.0, kTurnRate = 60.0 * kPi / 180;
+    double worst = 0, lastT = 0, yaw = 0;
+    V bike{ 0, 0, 0 };
+    LARGE_INTEGER frequency, start, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (t > kLaunch2 + kAir + 0.3)
+            break;
+        const double dt = t - lastT;
+        lastT = t;
+        if (t > kTurnStart && t < kTurnStart + kTurnTime)
+            yaw += kTurnRate * dt;
+        double height = 0;
+        const double launches[2] = { kLaunch1, kLaunch2 };
+        for (const double launch : launches) {
+            const double air = t - launch;
+            if (air > 0 && air < kAir)
+                height = 0.5 * kAirG * kAir * air - 0.5 * kAirG * air * air;
+        }
+        bike = bike + V{ std::cos(yaw), 0, std::sin(yaw) } * (kSpeed * dt);
+        bike.y = height;
+        double m[16];
+        View({ 0, 0, 0 }, yaw, 0, 0, m);
+        const V up{ m[1], m[5], m[9] };
+        const camera::Telemetry& tel = Draw(bike, bike + up * 1.0, yaw, 0, 0);
+        const double air2 = t - kLaunch2;
+        if (air2 > 0 && air2 < kAir + 0.3) {
+            worst = std::fmax(worst, std::fabs(Wrap(tel.outYaw - tel.rawYaw)));
+            g_bikeLost |= !tel.bikeTracked;
+        }
+        static double lastPrint = 0;
+        if (g_verbose && whipLock > 0 && t > kLaunch1 + kAir - 0.1 && t - lastPrint > 0.04) {
+            lastPrint = t;
+            printf("    t=%.2f view-path yaw %+5.1f fall %+.2fg airborne %.2f\n", t, Wrap(tel.outYaw - tel.rawYaw), tel.fallG, tel.airborne);
+        }
+        Sleep(7);
+    }
+    return worst;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -381,6 +438,11 @@ int main(int argc, char** argv)
     const double whoopOff = Whoop(0.0), whoopOn = Whoop(1.0);
     printf("  view up to %.1f deg off the game camera's heading without whip lock, %.1f deg with it\n", whoopOff, whoopOn);
     Check(whoopOn < whoopOff + 0.5, "whip lock ignores a whoop");
+
+    printf("Double: landing, a 20 deg turn at 60 deg/s, and another 1 s jump 0.45 s later\n");
+    const double doubleOn = Double(1.0);
+    printf("  view up to %.1f deg off the direction of travel through the second jump\n", doubleOn);
+    Check(doubleOn < 3, "whip lock holds the second jump's own direction, not the one before the turn");
     Check(!g_bikeLost, "the bike tracker had the bike throughout (the game's path was tested)");
     printf(g_failures ? "%d check(s) failed\n" : "All checks passed\n", g_failures);
     return g_failures ? 1 : 0;

@@ -115,11 +115,19 @@ constexpr double kWhipFallFraction = 0.5;
 constexpr double kWhipAirtimeMin  = 0.6, kWhipAirtimeFull  = 0.8;  // s, launch airtime
 constexpr double kWhipFallTimeMin = 0.8, kWhipFallTimeFull = 1.2;  // s, time in the air
 
-// Whip lock takes the direction of travel from this long before free fall is detected.
+// Whip lock takes the direction of travel as it was over this long before free fall is detected:
+// the path's own direction, averaged, not a filtered one. A filter lags a turn, and a double
+// taken while turning out of the landing of the one before (20 deg in 0.3 s) was held 18 deg
+// off its path, along the direction from before the turn, and swung back on landing.
 constexpr double kTravelHoldBack = 0.25;  // s
 constexpr int    kTravelSamples  = 128;   // frames of history: covers it up to ~500 fps
+// In the air the path seen from above is a straight line, so the held direction then settles
+// onto the line from where the fall began, once it has run far enough that the head's sway
+// (the eye's path) can't turn it.
+constexpr double kPathRunMin = 3.0, kPathRunFull = 10.0;  // units
+constexpr double kPathResponse = 4.0;                     // 1/s
 struct TravelSample {
-    Vec3   direction;
+    Vec3   direction;  // the direction of travel on that frame
     double rise = 0;  // upward speed (units/s)
     double dt   = 0;
 };
@@ -135,10 +143,12 @@ struct State {
     Vec3   airNose;               // slowly filtered nose heading in the air: bike, game camera
     Vec3   airNoseCamera;
     Vec3   travel;                // horizontal direction of travel, filtered (whip lock)
-    TravelSample travelHistory[kTravelSamples];  // the last moments of it on the ground
+    TravelSample travelHistory[kTravelSamples];  // on the ground since the last fall
     int    travelNext   = 0;
     int    travelCount  = 0;
     bool   wasFalling   = false;
+    Vec3   takeoffPos;            // where this fall began: the bike's origin, or the eye (whip lock)
+    bool   takeoffFromBike = false;
     double launchRise   = 0;      // upward speed at the lip of this fall (units/s, whip lock)
     double outOfFallTime = 0;    // in the air: how long the eye has read out of free fall
     Vec3   motionHeading;         // horizontal direction of the eye's velocity, last frame
@@ -542,39 +552,57 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
 
     // Whip lock: in the air the view holds the direction of travel, level, at the resting
     // look-down angle, whatever the bike does under it. In the air that direction can't change,
-    // so it is held from takeoff - as it was kTravelHoldBack before free fall was detected, as
-    // the head is already swinging sideways with the bike by then. On the ground it follows the
-    // velocity (or the view, when slow), filtered.
+    // so it is held from takeoff - as it was over kTravelHoldBack before free fall was detected,
+    // as the head is already swinging sideways with the bike by then - and settles onto the
+    // path actually flown. On the ground it follows the velocity (or the view, when slow),
+    // filtered. All of it from the bike when the tracker has it: the eye swings with the head.
     {
-        const Vec3 horizontal = s.velocity - worldUp * Dot(s.velocity, worldUp);
+        const bool fromBike = pose.tracked && pose.haveAccel;
+        const Vec3 velocity = fromBike ? Vec3{ pose.velocity[0], pose.velocity[1], pose.velocity[2] } : s.velocity;
+        const Vec3 horizontal = velocity - worldUp * Dot(velocity, worldUp);
         const double speed = Length(horizontal);
         const Vec3 viewFwd = Rotate(target, { 0, 0, -1 });
         const Vec3 viewHorizontal = viewFwd - worldUp * Dot(viewFwd, worldUp);
         const Vec3 direction = speed > 3.0 ? horizontal / speed
                              : Length(viewHorizontal) > 0.05 ? Normalize(viewHorizontal) : cameraAtt.heading;
         const bool falling = s.fallTime > 0 || s.inAir;
-        const Vec3 bikeVelocity{ pose.velocity[0], pose.velocity[1], pose.velocity[2] };
-        const double rise = Dot(pose.tracked && pose.haveAccel ? bikeVelocity : s.velocity, worldUp);
+        const double rise = Dot(velocity, worldUp);
+        const Vec3 bikePos{ pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2] };
         if (snap || Length(s.travel) < 0.5) {
             s.travel = direction;
             s.travelCount = 0;
         }
         if (!falling) {
             s.travel = Normalize(s.travel + (direction - s.travel) * LowPassAlpha(5.0, dt));
-            s.travelHistory[s.travelNext] = { s.travel, rise, dt };
+            s.travelHistory[s.travelNext] = { direction, rise, dt };
             s.travelNext = (s.travelNext + 1) % kTravelSamples;
             s.travelCount = s.travelCount < kTravelSamples ? s.travelCount + 1 : kTravelSamples;
         } else if (!s.wasFalling) {
             // Free fall is detected a little after the lip, so the launch speed is the fastest
             // rise over the same stretch the direction is taken from.
             s.launchRise = rise;
+            Vec3 sum{};
             double age = 0;
             for (int i = 1; i <= s.travelCount && age < kTravelHoldBack; ++i) {
                 const TravelSample& sample = s.travelHistory[(s.travelNext - i + kTravelSamples) % kTravelSamples];
-                s.travel = sample.direction;
+                sum = sum + sample.direction * sample.dt;
                 s.launchRise = std::fmax(s.launchRise, sample.rise);
                 age += sample.dt;
             }
+            if (Length(sum) > 1e-9)
+                s.travel = Normalize(sum);
+            // The history only ever holds the ground since the last fall: a fall read again just
+            // after landing must not reach back to before the jump.
+            s.travelCount = 0;
+            s.takeoffFromBike = fromBike && pose.fresh;
+            s.takeoffPos = s.takeoffFromBike ? bikePos : s.prevPos;
+        } else if (!s.takeoffFromBike || pose.fresh) {
+            const Vec3 run = (s.takeoffFromBike ? bikePos : s.prevPos) - s.takeoffPos;
+            const Vec3 path = run - worldUp * Dot(run, worldUp);
+            const double length = Length(path);
+            if (length > kPathRunMin)
+                s.travel = Normalize(s.travel + (path / length - s.travel) *
+                                     (LowPassAlpha(kPathResponse, dt) * SmoothStep(kPathRunMin, kPathRunFull, length)));
         }
         s.wasFalling = falling;
         // Engages within ~0.1 s of the first moment of deep free fall (the airborne estimate takes
