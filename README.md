@@ -1,22 +1,32 @@
-**WORK IN PROGRESS**
+# MXCam: MX Simulator Dynamic First Person Camera Mod
 
+Open source and purely OpenGL based.
 
+> [!WARNING]
+> **Work in progress.** Expect bugs and changes between updates.
 
-MX Simulator Dynamic First Person Camera Mod - Open source and purely OpenGL based
+---
 
-Short Video Preview:
-https://www.youtube.com/watch?v=9pBuHySU2qc
+## How to install: watch the tutorial video
 
-If you have any suggestions or find bugs feel free to dm me on discord > Username: voaks
+> [!IMPORTANT]
+> **Watch this before installing.** It shows every step.
+>
+> ### [CLICK HERE FOR THE VIDEO TUTORIAL](https://www.youtube.com/watch?v=wJv2dMv2B9Y)
 
+[![Video tutorial: how to install the MX Simulator camera mod](https://img.youtube.com/vi/wJv2dMv2B9Y/hqdefault.jpg)](https://www.youtube.com/watch?v=wJv2dMv2B9Y)
 
+---
 
+## Updating
 
-- **INSTRUCTIONS**
+If you already have the mod and want to update it:
 
-Video tutorial: https://www.youtube.com/watch?v=wJv2dMv2B9Y
+1. **Save your settings first.** Take a screenshot or write down your mod settings, just in case.
+2. Replace **both files** shown in the [tutorial video](https://www.youtube.com/watch?v=wJv2dMv2B9Y) (`opengl32.dll` and `mxcam.ini`) with the new ones.
 
+---
 
+## Suggestions and bugs
 
-
-If you already have it and are wanting to update it, you need to replace both files shown in the video. I would take a screenshot or write down your settings for the mod just in case.
+Found a bug or have an idea? DM me on Discord: **voaks**
