@@ -19,4 +19,4 @@ Go to \bin\x64\Release and copy opengl32.dll and mxcam.ini into game folder (whe
 If you already had it and are wanting to update it, you need to replace both files. I would take a screenshot or write down your settings just in case.
 
 
-Press "E" on keyboard to open the in-game menu.
+Press "E" on keyboard to open the in-game menu. The keybind can be changed to whatever inside the menu.
