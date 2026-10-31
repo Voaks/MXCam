@@ -247,7 +247,7 @@ constexpr int kAtlasSize = 1024;
 constexpr int kDiscX = 16, kDiscY = 4, kDiscSize = 64;
 constexpr int kGlyphTop = kDiscY + kDiscSize + 8;
 
-enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontTiny, kFontCount };
+enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontCount };
 
 struct Glyph {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
@@ -309,7 +309,6 @@ bool BuildAtlas(GLuint texture, float scale)
         { 15, FW_NORMAL },    // kFontBody
         { 15, FW_SEMIBOLD },  // kFontValue
         { 12, FW_SEMIBOLD },  // kFontSmall (smaller gets crunchy once GDI hinting kicks in)
-        { 11, FW_NORMAL },    // kFontTiny (the credit's aside only)
     };
     const int pad = 2;
     int penX = 0, penY = kGlyphTop, rowHeight = 0;
@@ -753,6 +752,9 @@ const RowDef kRows[] = {
               "behind. Release to look ahead again."),
     Slider(1, nullptr,          "Side look angle",     &Config::lookSideDeg,      30.0,   90.0, 1.0, 1.0,   0, "\xB0")
         .Help("How far the head turns when looking left / right with the d-pad."),
+    Slider(1, nullptr,          "Turn speed",          &Config::lookTurnSpeed,    2.0,   40.0, 1.0, 1.0,   0, "")
+        .Help("How quickly the head turns to look left / right / back and ahead again. Higher is "
+              "faster: 12 turns 90\xB0 in about a quarter of a second, 40 is nearly instant."),
     Slider(1, nullptr,          "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
         .Help("Custom camera: moves your eyes forward (+) or back (-) while looking left / right."),
     Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
@@ -1432,11 +1434,7 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     {
         y += S(18);
         const char* author = "By: Voaks";
-        const char* aside  = "(claude)";
-        const float asideW = TextWidth(kFontTiny, aside, 0), gapW = S(4);
-        const float authorX = x + innerW - asideW - gapW - TextWidth(kFontSmall, author, S(1));
-        Text(kFontSmall, authorX, y, author, Gray(130), S(1));
-        Text(kFontTiny, x + innerW - asideW, y + LineHeight(kFontSmall) - LineHeight(kFontTiny), aside, Gray(110), 0);
+        Text(kFontSmall, x + innerW - TextWidth(kFontSmall, author, S(1)), y, author, Gray(130), S(1));
     }
 
     if (in.released || !in.down) {

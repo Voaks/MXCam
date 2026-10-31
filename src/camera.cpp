@@ -206,9 +206,8 @@ Telemetry g_telemetry;
 MotionFit g_eyeFit;
 EventLog  g_cutLog, g_teleportLog;
 
-// D-pad look (SetLook). Turning the head: 90 deg takes ~0.2 s.
+// D-pad look (SetLook). The head turns at Config::lookTurnSpeed.
 Look g_look = Look::Ahead;
-constexpr double kHeadTurnResponse = 12.0;  // 1/s
 
 // Frame timing (FrameTick).
 double g_contentTime     = 0;      // the swap that started the frame being drawn, seconds
@@ -451,7 +450,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
                          : g_look == Look::Right ? side
                          : g_look == Look::Back  ? (s.headTurn < 0 ? -kPi : kPi)
                          : 0.0;
-        s.headTurn += (aim - s.headTurn) * (snap ? 1.0 : LowPassAlpha(kHeadTurnResponse, dt));
+        s.headTurn += (aim - s.headTurn) * (snap ? 1.0 : LowPassAlpha(cfg.lookTurnSpeed, dt));
     }
 
     const bool onGround = s.airborne < 0.3;

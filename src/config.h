@@ -50,6 +50,7 @@ struct Config {
     // [Look] the controller's d-pad looks left / right / back (the game has no look keys)
     bool   controllerLook  = true;
     double lookSideDeg     = 90.0;        // how far left / right looks turn the head
+    double lookTurnSpeed   = 12.0;        // 1/s how quickly the head turns (12: 90 deg in about 0.25 s)
     // extra eye offsets while looking sideways / back (custom camera)
     double lookSideForward = 0.0;
     double lookSideHeight  = 0.0;
