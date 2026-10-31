@@ -45,6 +45,7 @@ struct Config {
 
     // [Air]
     double airLooseness     = 0.6;        // 0..1 how much of the nose's left / right swing in the air the view lets pass
+    double whipLock         = 0.0;        // 0..1 in the air: hold the view on the direction of travel, level
 
     // [Look] extra eye offsets while looking sideways / back (custom camera)
     double lookSideForward = 0.0;
@@ -62,6 +63,12 @@ struct Config {
     double maxExtension     = 0.04;
     double nodDegPerMeter   = 40.0;
     double accelFilterHz    = 12.0;
+
+    // [Replay]
+    bool   replayChaseCam   = false;      // film replays from behind the rider instead of the game's replay camera
+    double replayDistance   = 4.5;        // 3rd person camera: m behind the rider
+    double replayHeight     = 1.55;       // m above the rider (the middle of its body)
+    double replayPitchDeg   = 12.0;       // look-down angle (positive = down)
 };
 
 const Config& GetConfig();

@@ -102,6 +102,8 @@
     <ClCompile Include="src\overlay.cpp" />
     <ClCompile Include="src\proc_hooks.cpp" />
     <ClCompile Include="src\proxy.cpp" />
+    <ClCompile Include="src\replay.cpp" />
+    <ClCompile Include="src\terrain.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\bike.h" />
@@ -112,6 +114,8 @@
     <ClInclude Include="src\log.h" />
     <ClInclude Include="src\mathlib.h" />
     <ClInclude Include="src\overlay.h" />
+    <ClInclude Include="src\replay.h" />
+    <ClInclude Include="src\terrain.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\gl_exports.inl" />

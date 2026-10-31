@@ -100,6 +100,7 @@ bool SaveConfig()
         { L"Leveling",  L"PitchLock",            g_config.pitchLock },
         { L"Leveling",  L"MaxRollCorrectionDeg", g_config.maxRollCorrectionDeg },
         { L"Air",       L"AirLooseness",         g_config.airLooseness },
+        { L"Air",       L"WhipLock",             g_config.whipLock },
         { L"Look",      L"LookSideForward",      g_config.lookSideForward },
         { L"Look",      L"LookSideHeight",       g_config.lookSideHeight },
         { L"Look",      L"LookBackForward",      g_config.lookBackForward },
@@ -113,6 +114,10 @@ bool SaveConfig()
         { L"Neck",      L"MaxExtension",         g_config.maxExtension },
         { L"Neck",      L"NodDegPerMeter",       g_config.nodDegPerMeter },
         { L"Neck",      L"AccelFilterHz",        g_config.accelFilterHz },
+        { L"Replay",    L"ChaseCam",             g_config.replayChaseCam ? 1.0 : 0.0 },
+        { L"Replay",    L"Distance",             g_config.replayDistance },
+        { L"Replay",    L"Height",               g_config.replayHeight },
+        { L"Replay",    L"PitchDeg",             g_config.replayPitchDeg },
     };
 
     bool ok = WritePrivateProfileStringW(L"General", L"Enabled", g_config.enabled ? L"1" : L"0", g_path) != FALSE;
@@ -144,6 +149,7 @@ void ResetTunables()
     g_config.pitchLock            = defaults.pitchLock;
     g_config.maxRollCorrectionDeg = defaults.maxRollCorrectionDeg;
     g_config.airLooseness         = defaults.airLooseness;
+    g_config.whipLock             = defaults.whipLock;
     g_config.lookSideForward      = defaults.lookSideForward;
     g_config.lookSideHeight       = defaults.lookSideHeight;
     g_config.lookBackForward      = defaults.lookBackForward;
@@ -157,6 +163,10 @@ void ResetTunables()
     g_config.maxExtension         = defaults.maxExtension;
     g_config.nodDegPerMeter       = defaults.nodDegPerMeter;
     g_config.accelFilterHz        = defaults.accelFilterHz;
+    g_config.replayChaseCam       = defaults.replayChaseCam;
+    g_config.replayDistance       = defaults.replayDistance;
+    g_config.replayHeight         = defaults.replayHeight;
+    g_config.replayPitchDeg       = defaults.replayPitchDeg;
 }
 
 void LoadConfig(const wchar_t* iniPath)
@@ -208,6 +218,7 @@ void ReloadConfig()
     c.maxRollCorrectionDeg = ReadDouble(L"Leveling", L"MaxRollCorrectionDeg", c.maxRollCorrectionDeg);
 
     c.airLooseness     = ReadDouble(L"Air", L"AirLooseness", c.airLooseness);
+    c.whipLock         = ReadDouble(L"Air", L"WhipLock", c.whipLock);
 
     c.lookSideForward = ReadDouble(L"Look", L"LookSideForward", c.lookSideForward);
     c.lookSideHeight  = ReadDouble(L"Look", L"LookSideHeight", c.lookSideHeight);
@@ -224,6 +235,11 @@ void ReloadConfig()
     c.nodDegPerMeter   = ReadDouble(L"Neck", L"NodDegPerMeter", c.nodDegPerMeter);
     c.accelFilterHz    = ReadDouble(L"Neck", L"AccelFilterHz", c.accelFilterHz);
 
+    c.replayChaseCam = ReadInt(L"Replay", L"ChaseCam", c.replayChaseCam) != 0;
+    c.replayDistance = ReadDouble(L"Replay", L"Distance", c.replayDistance);
+    c.replayHeight   = ReadDouble(L"Replay", L"Height", c.replayHeight);
+    c.replayPitchDeg = ReadDouble(L"Replay", L"PitchDeg", c.replayPitchDeg);
+
     // Keep every value inside a range the physics can't blow up with.
     c.viewMatrixIndex      = Clamp(c.viewMatrixIndex, 0, 10000);
     c.snapAngleDeg         = Clamp(c.snapAngleDeg, 1.0, 180.0);
@@ -238,6 +254,7 @@ void ReloadConfig()
     c.pitchLock            = Clamp(c.pitchLock, 0.0, 1.0);
     c.maxRollCorrectionDeg = Clamp(c.maxRollCorrectionDeg, 0.0, 180.0);
     c.airLooseness         = Clamp(c.airLooseness, 0.0, 1.0);
+    c.whipLock             = Clamp(c.whipLock, 0.0, 1.0);
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);
@@ -251,6 +268,9 @@ void ReloadConfig()
     c.maxExtension         = Clamp(c.maxExtension, 0.0, 10.0);
     c.nodDegPerMeter       = Clamp(c.nodDegPerMeter, -1000.0, 1000.0);
     c.accelFilterHz        = Clamp(c.accelFilterHz, 0.0, 200.0);
+    c.replayDistance       = Clamp(c.replayDistance, 0.5, 30.0);
+    c.replayHeight         = Clamp(c.replayHeight, -2.0, 15.0);
+    c.replayPitchDeg       = Clamp(c.replayPitchDeg, -45.0, 80.0);
 
     g_config = c;
     Log("config: loaded %ls (enabled=%d, %s camera, modelview='%s', camera program has '%s', up=%.2f,%.2f,%.2f)",

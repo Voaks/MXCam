@@ -88,6 +88,24 @@ private:
     bool   seeded_ = false;
 };
 
+// Landing (see FinishFrame): an impact, vertical acceleration this many g above resting...
+constexpr double kImpactG  = 0.8;
+// ...or the eye alone out of free fall for longer than a whip swings the head (s).
+constexpr double kSwingTime = 0.5;
+// In the air the direction of travel can't change. Turning faster than this (deg/s) is a
+// corner, whatever the vertical acceleration says: a bike laid over in a rut drops the eye
+// and bike as it leans in, which reads as free fall (85 deg of lean, 100 deg/s, seen in a
+// trace). Real jumps in the same trace stayed under 26 deg/s, whips included.
+constexpr double kAirTurnRateDeg = 40.0;
+
+// Whip lock takes the direction of travel from this long before free fall is detected.
+constexpr double kTravelHoldBack = 0.25;  // s
+constexpr int    kTravelSamples  = 128;   // frames of history: covers it up to ~500 fps
+struct TravelSample {
+    Vec3   direction;
+    double dt = 0;
+};
+
 struct State {
     bool   valid        = false;  // false: the next Update() seeds every filter from the raw camera
     bool   havePos      = false;  // false: FinishFrame() seeds the position filters
@@ -98,6 +116,15 @@ struct State {
     Vec3   accel;                 // world-space acceleration of the eye (units/s^2)
     Vec3   airNose;               // slowly filtered nose heading in the air: bike, game camera
     Vec3   airNoseCamera;
+    Vec3   travel;                // horizontal direction of travel, filtered (whip lock)
+    TravelSample travelHistory[kTravelSamples];  // the last moments of it on the ground
+    int    travelNext   = 0;
+    int    travelCount  = 0;
+    bool   wasFalling   = false;
+    double outOfFallTime = 0;     // in the air: how long the eye has read out of free fall
+    Vec3   motionHeading;         // horizontal direction of the eye's velocity, last frame
+    double turnRate     = 0;      // how fast that direction turns (rad/s, filtered)
+    double whip         = 0;      // 0..1 how far whip lock has taken over (eased)
     double airborne     = 0;      // 0 on the ground .. 1 in the air (eased)
     bool   inAir        = false;
     double fallTime     = 0;      // seconds of continuous free fall
@@ -481,6 +508,49 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
         target = Slerp(target, custom, m.customWeight);
         airYaw += (customAirYaw - airYaw) * m.customWeight;
     }
+
+    // Whip lock: in the air the view holds the direction of travel, level, at the resting
+    // look-down angle, whatever the bike does under it. In the air that direction can't change,
+    // so it is held from takeoff - as it was kTravelHoldBack before free fall was detected, as
+    // the head is already swinging sideways with the bike by then. On the ground it follows the
+    // velocity (or the view, when slow), filtered.
+    {
+        const Vec3 horizontal = s.velocity - worldUp * Dot(s.velocity, worldUp);
+        const double speed = Length(horizontal);
+        const Vec3 viewFwd = Rotate(target, { 0, 0, -1 });
+        const Vec3 viewHorizontal = viewFwd - worldUp * Dot(viewFwd, worldUp);
+        const Vec3 direction = speed > 3.0 ? horizontal / speed
+                             : Length(viewHorizontal) > 0.05 ? Normalize(viewHorizontal) : cameraAtt.heading;
+        const bool falling = s.fallTime > 0 || s.inAir;
+        if (snap || Length(s.travel) < 0.5) {
+            s.travel = direction;
+            s.travelCount = 0;
+        }
+        if (!falling) {
+            s.travel = Normalize(s.travel + (direction - s.travel) * LowPassAlpha(5.0, dt));
+            s.travelHistory[s.travelNext] = { s.travel, dt };
+            s.travelNext = (s.travelNext + 1) % kTravelSamples;
+            s.travelCount = s.travelCount < kTravelSamples ? s.travelCount + 1 : kTravelSamples;
+        } else if (!s.wasFalling) {
+            double age = 0;
+            for (int i = 1; i <= s.travelCount && age < kTravelHoldBack; ++i) {
+                const TravelSample& sample = s.travelHistory[(s.travelNext - i + kTravelSamples) % kTravelSamples];
+                s.travel = sample.direction;
+                age += sample.dt;
+            }
+        }
+        s.wasFalling = falling;
+        // Engages within ~0.1 s of the first moment of free fall (the airborne estimate takes too
+        // long for a whip thrown at the lip) and lets go over ~0.3 s after landing.
+        s.whip += ((falling ? 1.0 : 0.0) - s.whip) * LowPassAlpha(falling ? 25.0 : 6.0, dt);
+    }
+    const double whipWeight = cfg.whipLock * s.whip;
+    if (whipWeight > 1e-3) {
+        const double cameraRest = m.cameraPitchRest.Degrees();
+        const double customRest = -(cfg.keepGameAngle ? -m.gameAngleRest.Degrees() : cfg.cameraAngleDeg);
+        const double restPitch = (cameraRest + (customRest - cameraRest) * m.customWeight) * kDegToRad;
+        target = Slerp(target, Build(s.travel, restPitch, 0.0, worldUp), whipWeight);
+    }
     m.lastHeading = cameraAtt.heading;
 
     // Head position: along the bike (custom) or the game camera's own axes.
@@ -593,6 +663,8 @@ bool FinishFrame(const double view[16], double correction[16])
         s.neckOffset = s.neckVelocity = 0;
         s.inAir = false;
         s.fallTime = 0;
+        s.motionHeading = Vec3{};
+        s.turnRate = 0;
         s.prevPos      = rawPos;
         s.smoothHeight = Dot(rawPos, worldUp);
         g_eyeFit.Reset();
@@ -614,27 +686,64 @@ bool FinishFrame(const double view[16], double correction[16])
     }
     const double verticalAccel = Dot(s.accel, worldUp);
 
-    // Airborne: in the air everything is in free fall (-1 g); on the ground it hovers around 0 g.
-    // Both the eye and (when the tracker has it) the bike must be in free fall: either alone
-    // can fake it for a moment - the sprung game camera bouncing, or the bike flicking from one
-    // lean to the other through a corner. Free fall must also last a quarter second (a real
-    // jump lasts far longer), and only a clear return toward 0 g counts as landing.
+    // How fast the direction of travel turns (only measurable when moving). From the bike when
+    // the tracker has it: the eye is on the rider's head, which a whip swings from side to side
+    // (up to 90 deg/s of apparent turning in a test), while the bike's own path holds straight.
     const bike::Pose& pose = bike::Current();
-    double fallG = verticalAccel / kGravity;
+    const bool bikeAccel = pose.tracked && pose.haveAccel;
+    {
+        const Vec3 travel = bikeAccel ? Vec3{ pose.velocity[0], pose.velocity[1], pose.velocity[2] } : s.velocity;
+        const Vec3 horizontal = travel - worldUp * Dot(travel, worldUp);
+        const double speed = Length(horizontal);
+        double rate = 0;
+        if (speed > 3.0) {
+            const Vec3 heading = horizontal / speed;
+            if (Length(s.motionHeading) > 0.5 && dt > 1e-5)
+                rate = std::acos(Clamp(Dot(heading, s.motionHeading), -1.0, 1.0)) / dt;
+            s.motionHeading = heading;
+        } else {
+            s.motionHeading = Vec3{};
+        }
+        s.turnRate += (rate - s.turnRate) * LowPassAlpha(10.0, dt);
+    }
+    const bool turning = s.turnRate > kAirTurnRateDeg * kDegToRad;
+
+    // Airborne: in the air everything is in free fall (-1 g); on the ground it hovers around 0 g.
+    // Takeoff: both the eye and (when the tracker has it) the bike must be in free fall - either
+    // alone can fake it for a moment: the sprung game camera bouncing, or the bike flicking from
+    // one lean to the other through a corner - for a quarter second (a real jump lasts far longer).
+    // Landing: the eye alone can't be trusted. It is on the rider's head, which swings through
+    // an arc as the bike is laid over in a whip or scrub, and can read near 0 g for a few tenths
+    // of a second in mid-air. So it takes the bike back out of free fall, a clear impact, or
+    // (untracked) the eye out of free fall for longer than a swing lasts.
+    // Either way, a direction of travel that is turning means the wheels are on the ground.
+    double eyeFallG = verticalAccel / kGravity;
     {
         Vec3 unusedVelocity, slowAccel;
         if (g_eyeFit.Estimate(0.15, unusedVelocity, slowAccel))
-            fallG = Dot(slowAccel, worldUp) / kGravity;
+            eyeFallG = Dot(slowAccel, worldUp) / kGravity;
     }
-    if (pose.tracked && pose.haveAccel)
-        fallG = std::fmax(fallG, pose.verticalAccelG);
-    if (fallG < -0.7) {
-        s.fallTime += dt;
-        if (s.fallTime > 0.25)
-            s.inAir = true;
-    } else if (fallG > -0.4) {
-        s.fallTime = 0;
-        s.inAir = false;
+    const double fallG = bikeAccel ? std::fmax(eyeFallG, pose.verticalAccelG) : eyeFallG;
+    if (!s.inAir) {
+        if (fallG < -0.7 && !turning) {
+            s.fallTime += dt;
+            if (s.fallTime > 0.25)
+                s.inAir = true;
+        } else if (fallG > -0.4 || turning) {
+            s.fallTime = 0;
+        }
+        s.outOfFallTime = 0;
+    } else {
+        s.outOfFallTime = eyeFallG > -0.4 ? s.outOfFallTime + dt : 0.0;
+        const bool impact = eyeFallG > kImpactG || (bikeAccel && pose.verticalAccelG > kImpactG);
+        const bool landed = impact || turning ||
+                            (bikeAccel ? pose.verticalAccelG > -0.4 : s.outOfFallTime > kSwingTime);
+        if (landed) {
+            s.inAir = false;
+            s.fallTime = 0;
+        } else {
+            s.fallTime += dt;
+        }
     }
     // Eases in over a few tenths of a second, and out twice as fast on landing.
     s.airborne += ((s.inAir ? 1.0 : 0.0) - s.airborne) * LowPassAlpha(s.inAir ? 4.0 : 8.0, dt);

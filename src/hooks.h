@@ -35,6 +35,22 @@ void DumpCall(const char* format, ...);
 // extensions). Returns our wrapper for the ones we intercept, otherwise the real pointer.
 void* WrapProc(const char* name, void* real);
 
+// A draw call as the game made it: glDrawElements, glDrawArrays or glDrawRangeElements.
+struct DrawCall {
+    enum Kind { Elements, Arrays, RangeElements } kind = Elements;
+    unsigned    mode    = 0;
+    int         first   = 0;        // glDrawArrays
+    unsigned    start   = 0;        // glDrawRangeElements
+    unsigned    end     = 0;
+    int         count   = 0;
+    unsigned    type    = 0;        // index type (the Elements kinds)
+    const void* indices = nullptr;  // offset into the element buffer
+};
+
+// Every draw call, before it is made. The terrain's are recorded so replays can fill in the
+// ground the game culled (proc_hooks.cpp).
+void NoteDraw(const DrawCall& draw);
+
 // Called once per frame by the swap hook. Returns true if the shader path found the camera
 // this frame.
 bool EndShaderFrame();

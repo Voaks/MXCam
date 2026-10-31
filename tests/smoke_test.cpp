@@ -26,7 +26,8 @@ namespace {
     X(glFrustum) X(glOrtho) X(glPushMatrix) X(glPopMatrix) X(wglCreateContext)         \
     X(wglMakeCurrent) X(wglDeleteContext) X(wglGetProcAddress) X(glGetError)           \
     X(glGetIntegerv) X(glIsEnabled) X(glEnable) X(glDisable) X(glViewport)             \
-    X(glClearColor) X(glClear) X(glReadBuffer) X(glReadPixels) X(glPixelStorei) X(glFinish)
+    X(glClearColor) X(glClear) X(glReadBuffer) X(glReadPixels) X(glPixelStorei) X(glFinish) \
+    X(glDrawElements) X(glBlendFunc)
 
 #define DECLARE(name) decltype(&::name) p_##name = nullptr;
 GL_FUNCTIONS(DECLARE)
@@ -550,6 +551,290 @@ int main(int argc, char** argv)
                 } else {
                     Check(fabs(levelPitch - mountPitch) < 0.6, "game camera untouched on flat ground");
                     Check(fabs(wheeliePitch - (mountPitch + 15.0)) < 1.5, "pitch lock halves the wheelie (30 degrees -> 15)");
+                }
+            }
+            Swap(true);
+
+            // A replay: the game's replay camera looks 26.6 degrees down from 5 up and 10 back of
+            // the rider, slowly orbiting round it (20 degrees/s; it is beside the rider, looking
+            // across its path, when the ground is checked), while the rider rides along +X at
+            // 10 units/s. The rider's skinned mesh is drawn after the terrain with its bones' world
+            // positions in u_bone_t.
+            printf("Replay (%s)\n", custom ? "3rd person camera, ChaseCam=1" : "game camera");
+            {
+                const GLuint skinned = build(
+                    "uniform mat4 u_modelview; uniform mat4 u_projection; uniform vec3 u_bone_t[9];\n"
+                    "void main() { gl_Position = u_projection * u_modelview * gl_Vertex + vec4(u_bone_t[0] + u_bone_t[8], 0.0); }");
+                const GLint skinnedMv = glGetUniformLocation(skinned, "u_modelview");
+                const GLint bones = glGetUniformLocation(skinned, "u_bone_t");
+                Check(skinned && bones >= 0, "skinned test shader compiles and links");
+
+                // The ground, like MX Simulator's: a flat 2048 x 2048 map drawn as a quadtree of
+                // patches, one unit square mesh placed by u_meshoffset / u_meshscale, skipping the
+                // patches entirely behind the plane through the game camera. Every fragment adds
+                // 0.25 to red, so a pixel covered twice (overlapping patches) shows up as 0.5.
+                using PFN_BindAttribLocation = void(APIENTRY*)(GLuint, GLuint, const char*);
+                using PFN_GenObjects         = void(APIENTRY*)(GLsizei, GLuint*);
+                using PFN_BindObject         = void(APIENTRY*)(GLuint);
+                using PFN_BindBuffer         = void(APIENTRY*)(GLenum, GLuint);
+                using PFN_BufferData         = void(APIENTRY*)(GLenum, ptrdiff_t, const void*, GLenum);
+                using PFN_VertexAttribPointer = void(APIENTRY*)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
+                using PFN_Uniform2fv         = void(APIENTRY*)(GLint, GLsizei, const GLfloat*);
+                using PFN_Uniform1f          = void(APIENTRY*)(GLint, GLfloat);
+#define PROC(type, name) auto name = reinterpret_cast<type>(p_wglGetProcAddress(#name))
+                PROC(PFN_BindAttribLocation, glBindAttribLocation);
+                PROC(PFN_GenObjects, glGenVertexArrays);
+                PROC(PFN_BindObject, glBindVertexArray);
+                PROC(PFN_GenObjects, glGenBuffers);
+                PROC(PFN_BindBuffer, glBindBuffer);
+                PROC(PFN_BufferData, glBufferData);
+                PROC(PFN_VertexAttribPointer, glVertexAttribPointer);
+                PROC(PFN_BindObject, glEnableVertexAttribArray);
+                PROC(PFN_Uniform2fv, glUniform2fv);
+                PROC(PFN_Uniform1f, glUniform1f);
+#undef PROC
+                const bool groundTest = glBindAttribLocation && glGenVertexArrays && glBindVertexArray && glGenBuffers &&
+                                        glBindBuffer && glBufferData && glVertexAttribPointer && glEnableVertexAttribArray &&
+                                        glUniform2fv && glUniform1f;
+                GLuint ground = 0, groundArrays[16] = {};
+                GLint groundMv = -1, groundProjection = -1, meshOffset = -1, meshScale = -1, texOffset = -1, texScale = -1;
+                if (groundTest) {
+                    const char* vertexSource =
+                        "attribute vec2 a_corner; varying vec2 v_tex;\n"
+                        "uniform mat4 u_modelview; uniform mat4 u_projection; uniform float u_heights;\n"
+                        "uniform vec2 u_meshoffset; uniform float u_meshscale; uniform vec2 u_texoffset; uniform float u_texscale;\n"
+                        "void main() {\n"
+                        "    vec2 p = u_meshoffset + a_corner * u_meshscale;\n"
+                        "    v_tex = (p + u_texoffset) * u_texscale;\n"
+                        "    gl_Position = u_projection * u_modelview * vec4(p.x, u_heights, p.y, 1.0);\n"
+                        "}";
+                    const char* fragmentSource = "varying vec2 v_tex; void main() { gl_FragColor = vec4(0.25, v_tex * 0.01, 1.0); }";
+                    const GLuint vs = glCreateShader(0x8B31 /* GL_VERTEX_SHADER */);
+                    const GLuint fs = glCreateShader(0x8B30 /* GL_FRAGMENT_SHADER */);
+                    glShaderSource(vs, 1, &vertexSource, nullptr);
+                    glShaderSource(fs, 1, &fragmentSource, nullptr);
+                    glCompileShader(vs);
+                    glCompileShader(fs);
+                    ground = glCreateProgram();
+                    glAttachShader(ground, vs);
+                    glAttachShader(ground, fs);
+                    glBindAttribLocation(ground, 0, "a_corner");
+                    glLinkProgram(ground);
+                    GLint linked = 0;
+                    glGetProgramiv(ground, 0x8B82 /* GL_LINK_STATUS */, &linked);
+                    Check(linked != 0, "ground test shader compiles and links");
+                    groundMv = glGetUniformLocation(ground, "u_modelview");
+                    groundProjection = glGetUniformLocation(ground, "u_projection");
+                    glGetUniformLocation(ground, "u_heights");
+                    meshOffset = glGetUniformLocation(ground, "u_meshoffset");
+                    meshScale = glGetUniformLocation(ground, "u_meshscale");
+                    texOffset = glGetUniformLocation(ground, "u_texoffset");
+                    texScale = glGetUniformLocation(ground, "u_texscale");
+
+                    // One vertex array per combination of stitched edges, like the game's (the
+                    // single-quad mesh here looks the same stitched or not).
+                    glGenVertexArrays(16, groundArrays);
+                    for (GLuint vertexArray : groundArrays) {
+                        GLuint buffers[2] = {};
+                        glBindVertexArray(vertexArray);
+                        glGenBuffers(2, buffers);
+                        const float corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+                        const unsigned short indices[6] = { 0, 1, 2, 2, 1, 3 };
+                        glBindBuffer(0x8892 /* GL_ARRAY_BUFFER */, buffers[0]);
+                        glBufferData(0x8892, sizeof corners, corners, 0x88E4 /* GL_STATIC_DRAW */);
+                        glBindBuffer(0x8893 /* GL_ELEMENT_ARRAY_BUFFER */, buffers[1]);
+                        glBufferData(0x8893, sizeof indices, indices, 0x88E4);
+                        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+                        glEnableVertexAttribArray(0);
+                    }
+                    glBindVertexArray(0);
+                } else {
+                    printf("    (no vertex arrays here; the ground fill isn't tested)\n");
+                }
+                // 90 degrees vertical field of view, 16:9, near 0.5, far 4000.
+                const float n = 0.5f, f = 4000.0f;
+                const float projection[16] = { 0.5625f, 0, 0, 0, 0, 1, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0 };
+
+                // The game's patches: split while the game camera is within 2 patch sizes, down to
+                // 32 (none bigger than 512), skipped when entirely behind the game camera.
+                struct GameCamera { V3 eye, forward; } gameCamera{};
+                int gamePatches = 0;
+                GLuint lastArray = 0;
+                std::vector<int> cells{ 0, 0, 2048 };
+                const auto splits = [&](int x, int z, int size) {
+                    const double dx = fmax(0.0, fmax(x - gameCamera.eye.x, gameCamera.eye.x - (x + size)));
+                    const double dz = fmax(0.0, fmax(z - gameCamera.eye.z, gameCamera.eye.z - (z + size)));
+                    return size > 512 || (size > 32 && sqrt(dx * dx + dz * dz) < 2.0 * size);
+                };
+                // The size of the patch (drawn or culled) holding a point; 0 off the map.
+                const auto leafSize = [&](int px, int pz) {
+                    if (px < 0 || pz < 0 || px >= 2048 || pz >= 2048)
+                        return 0;
+                    int x = 0, z = 0, size = 2048;
+                    while (splits(x, z, size)) {
+                        size /= 2;
+                        x += px >= x + size ? size : 0;
+                        z += pz >= z + size ? size : 0;
+                    }
+                    return size;
+                };
+                const auto drawGameTerrain = [&]() {
+                    gamePatches = 0;
+                    cells.assign({ 0, 0, 2048 });
+                    while (!cells.empty()) {
+                        const int size = cells.back(), z = cells[cells.size() - 2], x = cells[cells.size() - 3];
+                        cells.resize(cells.size() - 3);
+                        double ahead = -1e9;
+                        for (int c = 0; c < 4; ++c)
+                            ahead = fmax(ahead, Dot({ x + (c & 1 ? size : 0) - gameCamera.eye.x, -gameCamera.eye.y,
+                                                      z + (c & 2 ? size : 0) - gameCamera.eye.z }, gameCamera.forward));
+                        if (ahead < 0)
+                            continue;
+                        if (splits(x, z, size)) {
+                            const int half = size / 2;
+                            for (int c = 0; c < 4; ++c)
+                                cells.insert(cells.end(), { x + (c & 1 ? half : 0), z + (c & 2 ? half : 0), half });
+                            continue;
+                        }
+                        const int stitched = (leafSize(x - 1, z) > size ? 1 : 0) | (leafSize(x + size, z) > size ? 2 : 0) |
+                                             (leafSize(x, z - 1) > size ? 4 : 0) | (leafSize(x, z + size) > size ? 8 : 0);
+                        if (groundArrays[stitched] != lastArray) {
+                            lastArray = groundArrays[stitched];
+                            glBindVertexArray(lastArray);
+                        }
+                        const float offset[2] = { float(x), float(z) }, none[2] = {};
+                        glUniform2fv(meshOffset, 1, offset);
+                        glUniform1f(meshScale, float(size));
+                        glUniform2fv(texOffset, 1, none);
+                        glUniform1f(texScale, 0);
+                        p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                        ++gamePatches;
+                    }
+                };
+                // Pixels from the bottom of the screen to just below the horizon (all of it ground
+                // inside the map): returns the fractions covered once, more than once and not at all.
+                const int rows = 535;
+                std::vector<unsigned char> red(1600 * rows);
+                const auto coverage = [&](double& once, double& twice, double& none) {
+                    p_glReadBuffer(GL_BACK);
+                    p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    p_glReadPixels(0, 0, 1600, rows, GL_RED, GL_UNSIGNED_BYTE, red.data());
+                    int counts[3] = {};
+                    for (unsigned char value : red)
+                        ++counts[value < 20 ? 2 : value <= 80 ? 0 : 1];
+                    once = double(counts[0]) / red.size();
+                    twice = double(counts[1]) / red.size();
+                    none = double(counts[2]) / red.size();
+                };
+                double gameOnly[3] = { 0, 0, 1 }, filled[3] = { 0, 0, 1 };
+                bool groundChecked = false, arrayRestored = true;
+                int groundPatches = 0;
+
+                LARGE_INTEGER freq, start, now;
+                QueryPerformanceFrequency(&freq);
+                QueryPerformanceCounter(&start);
+                double maxPassThrough = 0, chaseHeading = 0, chasePitch = 0, chaseEyeError = 1e9;
+                for (;;) {
+                    QueryPerformanceCounter(&now);
+                    const double t = double(now.QuadPart - start.QuadPart) / freq.QuadPart;
+                    if (t > 2.6) break;
+                    // In the middle of the map, so the ground stretches all round.
+                    const V3 rider{ 1000 + 10 * t, 1, 1000 };
+                    float replayView[16];
+                    const double orbit = 20 * t - 44, orbitRad = orbit * 3.14159265358979 / 180;
+                    const V3 replayEye{ rider.x + 10 * sin(orbitRad), rider.y + 5, rider.z + 10 * cos(orbitRad) };
+                    MakeView(replayEye, orbit, -26.565, 0, replayView);
+                    glUseProgram(terrain);
+                    glUniformMatrix4fv(terrainMv, 1, GL_FALSE, replayView);
+                    glGetUniformfv(terrain, terrainMv, readback);
+                    if (t > 0.6) {
+                        double difference = 0;
+                        for (int i = 0; i < 16; ++i)
+                            difference = fmax(difference, fabs(double(readback[i]) - replayView[i]));
+                        maxPassThrough = fmax(maxPassThrough, difference);
+                    }
+                    if (t > 2.2) {
+                        const V3 back{ readback[2], readback[6], readback[10] };
+                        chaseHeading = atan2(-back.z, -back.x) * 180 / 3.14159265358979;  // 0 = looking along +X
+                        chasePitch = ViewPitch(readback);
+                        V3 chaseEye; double unusedRoll;
+                        Decompose(readback, chaseEye, unusedRoll);
+                        // The default placement: 4.5 behind and 1.55 above the rider.
+                        const V3 wanted{ rider.x - 4.5, rider.y + 1.55, rider.z };
+                        chaseEyeError = EyeShift(chaseEye, wanted);
+                    }
+
+                    // The ground, once the chase camera has settled: read back what the game's
+                    // patches cover, then (after the switch to the next program) with the fill.
+                    if (ground) {
+                        const bool measure = t > 2.2 && !groundChecked;
+                        gameCamera.eye = replayEye;
+                        gameCamera.forward = { -replayView[2], -replayView[6], -replayView[10] };
+                        p_glViewport(0, 0, 1600, 900);
+                        p_glClearColor(0, 0, 0, 1);
+                        p_glClear(GL_COLOR_BUFFER_BIT);
+                        p_glDisable(GL_DEPTH_TEST);
+                        p_glDisable(GL_CULL_FACE);
+                        p_glEnable(GL_BLEND);
+                        p_glBlendFunc(GL_ONE, GL_ONE);
+                        glUseProgram(ground);
+                        lastArray = 0;
+                        glBindVertexArray(0);
+                        glUniformMatrix4fv(groundMv, 1, GL_FALSE, replayView);
+                        glUniformMatrix4fv(groundProjection, 1, GL_FALSE, projection);
+                        drawGameTerrain();
+                        if (measure) {
+                            coverage(gameOnly[0], gameOnly[1], gameOnly[2]);
+                            groundPatches = gamePatches;
+                        }
+                    }
+
+                    // The bones: spread around the rider, centred on it.
+                    float boneData[27];
+                    for (int b = 0; b < 9; ++b) {
+                        boneData[b * 3]     = float(rider.x + 0.3 * (b % 3 - 1));
+                        boneData[b * 3 + 1] = float(rider.y + 0.4 * (b / 3 - 1));
+                        boneData[b * 3 + 2] = float(rider.z + 0.2 * ((b * 7) % 3 - 1));
+                    }
+                    glUseProgram(skinned);
+                    if (ground) {
+                        GLint bound = 0;
+                        p_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &bound);
+                        arrayRestored = arrayRestored && GLuint(bound) == lastArray;
+                        if (t > 2.2 && !groundChecked) {
+                            coverage(filled[0], filled[1], filled[2]);
+                            groundChecked = true;
+                        }
+                        p_glDisable(GL_BLEND);
+                    }
+                    glUniform3fv(bones, 9, boneData);
+                    glUniformMatrix4fv(skinnedMv, 1, GL_FALSE, replayView);
+                    Swap();
+                    Sleep(5);
+                }
+                if (ground) {
+                    glBindVertexArray(0);
+                    printf("    ground: %d game patches cover %.1f%% (%.2f%% twice), with the fill %.2f%% once, %.2f%% twice, %.2f%% missing\n",
+                           groundPatches, 100 * (gameOnly[0] + gameOnly[1]), 100 * gameOnly[1], 100 * filled[0], 100 * filled[1], 100 * filled[2]);
+                    Check(groundChecked && gameOnly[1] < 0.001, "the simulated game's patches never overlap");
+                    Check(arrayRestored, "the game's vertex array is bound again after the ground pass");
+                }
+                if (custom) {
+                    printf("    3rd person: heading %.2f deg, pitch %.2f deg, eye %.3f from where it belongs\n",
+                           chaseHeading, chasePitch, chaseEyeError);
+                    Check(fabs(chaseHeading) < 1.0, "the camera turns to look along the rider's path");
+                    Check(fabs(chasePitch + 12.0) < 0.5, "it looks 12 degrees down at the rider");
+                    Check(chaseEyeError < 0.05, "it sits behind and above the rider, locked to it");
+                    if (ground) {
+                        Check(gameOnly[2] > 0.01, "the game's culling leaves holes in the 3rd person view (test is meaningful)");
+                        Check(filled[2] < 0.002, "the fill covers the ground the game culled");
+                        Check(filled[1] < 0.002, "filled cells never overlap the game's patches");
+                    }
+                } else {
+                    printf("    largest change to the replay camera once recognised: %.2g\n", maxPassThrough);
+                    Check(maxPassThrough < 1e-6, "the game's replay camera is left untouched");
+                    if (ground)
+                        Check(filled[0] == gameOnly[0] && filled[1] == gameOnly[1], "nothing is filled in for the game's own camera");
                 }
             }
             Swap(true);

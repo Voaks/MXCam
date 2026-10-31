@@ -22,11 +22,16 @@
 //       part of C too, or turning the view would turn the lighting with it;
 //     - reflections look up an environment map through 'u_envmat' (eye -> world rotation, the
 //       transpose of the view's), which becomes u_envmat * C^T so reflections stay put.
+//   - replays are recognised by replay.cpp and skip all of the above: they are passed through
+//     untouched, or corrected to its chase camera (the rider is found through 'u_bone_t').
+//     The game culls the terrain patches behind its own replay camera, so with the chase camera
+//     the missing ones are drawn when the game is done with the terrain program (terrain.h).
 //   TraceKey (F11) records a per-frame trace (mxcam_trace.csv) for diagnosing jerks.
 //   Uniform names are logged as the game looks them up, and every upload goes into the F10 dump.
 
 #include <windows.h>
 #include <GL/gl.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -35,12 +40,15 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "bike.h"
 #include "camera.h"
 #include "config.h"
 #include "hooks.h"
 #include "log.h"
+#include "replay.h"
+#include "terrain.h"
 
 namespace mxcam {
 namespace {
@@ -53,6 +61,13 @@ using PFN_ProgramUniformMatrix4fv = void (APIENTRY*)(GLuint program, GLint locat
 using PFN_Uniform4fv              = void (APIENTRY*)(GLint location, GLsizei count, const GLfloat* value);
 using PFN_Uniform3fv              = PFN_Uniform4fv;
 using PFN_UniformMatrix3fv        = PFN_UniformMatrix4fv;
+using PFN_Uniform2fv              = PFN_Uniform4fv;
+using PFN_Uniform1f               = void (APIENTRY*)(GLint location, GLfloat v0);
+using PFN_DrawRangeElements       = void (APIENTRY*)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices);
+using PFN_BindVertexArray         = void (APIENTRY*)(GLuint array);
+using PFN_BindBuffer              = void (APIENTRY*)(GLenum target, GLuint buffer);
+using PFN_DrawElements            = void (APIENTRY*)(GLenum mode, GLsizei count, GLenum type, const void* indices);
+using PFN_DrawArrays              = void (APIENTRY*)(GLenum mode, GLint first, GLsizei count);
 
 // Real driver functions, filled in by WrapProc() when the game first asks for them.
 // The ARB variants have the same signatures (GLhandleARB is an unsigned int on Windows).
@@ -69,8 +84,18 @@ PFN_Uniform3fv              real_glUniform3fv              = nullptr;
 PFN_Uniform3fv              real_glUniform3fvARB           = nullptr;
 PFN_UniformMatrix3fv        real_glUniformMatrix3fv        = nullptr;
 PFN_UniformMatrix3fv        real_glUniformMatrix3fvARB     = nullptr;
+PFN_Uniform2fv              real_glUniform2fv              = nullptr;
+PFN_Uniform1f               real_glUniform1f               = nullptr;
+PFN_DrawRangeElements       real_glDrawRangeElements       = nullptr;
+PFN_BindVertexArray         real_glBindVertexArray         = nullptr;
+PFN_BindBuffer              real_glBindBuffer              = nullptr;
+PFN_DrawElements            real_glDrawElements            = nullptr;  // OpenGL 1.1 exports, for replaying
+PFN_DrawArrays              real_glDrawArrays              = nullptr;  // the terrain's draw calls
 
 constexpr int kMaxLookupsLogged = 500;
+
+// The rider's skinned mesh: world-space bone positions (vec3 array). Replays find the rider by it.
+constexpr char kBoneUniform[] = "u_bone_t";
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::unordered_set<std::string> g_fetched;                       // names already logged
@@ -78,6 +103,7 @@ std::unordered_map<unsigned long long, std::string> g_uniforms;  // (program << 
 std::unordered_set<unsigned long long> g_modelviewUniforms;      // (program, location) of each u_modelview
 std::unordered_set<unsigned long long> g_lightUniforms;          // (program, location) of each light direction
 std::unordered_set<unsigned long long> g_envUniforms;            // (program, location) of each environment-map matrix
+std::unordered_set<unsigned long long> g_boneUniforms;           // (program, location) of each skinned mesh's bone positions
 std::unordered_set<GLuint> g_cameraPrograms;                     // programs that draw the terrain
 int     g_lookupsLogged = 0;
 GLuint  g_program = 0;                                           // program bound by glUseProgram
@@ -97,6 +123,58 @@ ShaderCamera g_camera;
 
 // Rotation-only draws further than this from the last camera rotation are not the sky.
 constexpr double kMaxSkyAngleDeg = 45.0;
+
+// The terrain, drawn in patches (see terrain.h). In 3rd person replays the cells the game culled
+// are drawn after its own patches, with the same draw calls and the patch uniforms changed.
+constexpr char  kMeshOffsetUniform[]   = "u_meshoffset";
+constexpr char  kMeshScaleUniform[]    = "u_meshscale";
+constexpr char  kTexOffsetUniform[]    = "u_texoffset";
+constexpr char  kTexScaleUniform[]     = "u_texscale";
+constexpr char  kSpacingUniform[]      = "u_spacing";          // set when a track's heightmap loads
+constexpr char  kHeightsDimUniform[]   = "u_heights_dim_inv";
+constexpr GLenum kElementArrayBuffer   = 0x8893;               // GL_ELEMENT_ARRAY_BUFFER
+constexpr int   kMaxPatchDraws         = 4;                    // draw calls per patch that can be replayed
+constexpr int   kMaxFilledPatches      = 1024;
+
+struct TerrainUniforms {
+    GLint offset = -1, scale = -1, texOffset = -1, texScale = -1, spacing = -1, heightsDim = -1;
+};
+struct TerrainUniformName {
+    const char* name;
+    GLint TerrainUniforms::*field;
+};
+const TerrainUniformName kTerrainUniformNames[] = {
+    { kMeshOffsetUniform, &TerrainUniforms::offset },  { kMeshScaleUniform, &TerrainUniforms::scale },
+    { kTexOffsetUniform, &TerrainUniforms::texOffset }, { kTexScaleUniform, &TerrainUniforms::texScale },
+    { kSpacingUniform, &TerrainUniforms::spacing },     { kHeightsDimUniform, &TerrainUniforms::heightsDim },
+};
+std::unordered_map<GLuint, TerrainUniforms> g_terrainUniforms;  // program -> its patch uniforms
+
+struct GamePatch {
+    terrain::Patch patch;
+    DrawCall       draws[kMaxPatchDraws];
+    int            drawCount = 0;
+    GLuint         vao = 0;                // the vertex array it was drawn with
+    bool           replayable = true;      // indices from a buffer, few enough draw calls
+};
+
+struct TerrainPass {
+    TerrainUniforms uniforms;              // the bound program's patch uniforms (-1: it has none)
+    bool   isTerrain     = false;          // the bound program draws the terrain in patches
+    terrain::Patch current;                // the patch uniforms as last uploaded
+    std::vector<GamePatch> patches;        // the game's patches so far this pass
+    bool   haveEye       = false;          // the chase camera this frame, for the fill
+    double eye[3]        = {};
+    double forward[3]    = {};
+};
+TerrainPass g_terrain;
+GLuint g_mapProgram = 0;                                 // the terrain program the map was learnt from
+float  g_heightmapUpload[2][2] = {};                     // u_spacing, u_heights_dim_inv as last uploaded
+GLuint g_vao = 0;                                        // bound by glBindVertexArray
+std::unordered_map<GLuint, GLuint> g_elementBuffers;     // vertex array -> its element buffer
+terrain::Patch g_filled[kMaxFilledPatches];
+// The game's draw calls per vertex array variant (see terrain.h), kept until the next heightmap.
+std::unordered_map<GLuint, GamePatch> g_variants;
 
 // Per-frame trace (TraceKey). Every frame goes into a ring buffer, so the key saves the seconds
 // *before* it was pressed (the moment something looked wrong) and then keeps recording a while.
@@ -119,7 +197,26 @@ unsigned long long UniformKey(GLuint program, GLint location)
     return (static_cast<unsigned long long>(program) << 32) | static_cast<unsigned int>(location);
 }
 
-void NoteUseProgram(GLuint program) { g_program = program; }
+// Whether the bound program draws the terrain in patches, and through which uniforms.
+void RefreshTerrainProgram()
+{
+    AcquireSRWLockShared(&g_lock);
+    const auto found = g_terrainUniforms.find(g_program);
+    g_terrain.uniforms = found != g_terrainUniforms.end() ? found->second : TerrainUniforms{};
+    const bool camera = g_cameraPrograms.count(g_program) != 0;
+    ReleaseSRWLockShared(&g_lock);
+    g_terrain.isTerrain = camera && g_terrain.uniforms.offset >= 0 && g_terrain.uniforms.scale >= 0;
+}
+
+void FinishTerrainPass();
+
+void NoteUseProgram(GLuint program)
+{
+    if (program != g_program)
+        FinishTerrainPass();  // before the switch: the fill draws with the terrain program
+    g_program = program;
+    RefreshTerrainProgram();
+}
 
 void NoteUniformLocation(GLuint program, const GLchar* name, GLint location)
 {
@@ -136,12 +233,20 @@ void NoteUniformLocation(GLuint program, const GLchar* name, GLint location)
         g_lightUniforms.insert(key);
     if (strcmp(name, cfg.envUniform) == 0)
         g_envUniforms.insert(key);
+    if (strcmp(name, kBoneUniform) == 0)
+        g_boneUniforms.insert(key);
     if (strcmp(name, cfg.cameraProgramUniform) == 0)
         g_cameraPrograms.insert(program);
+    for (const TerrainUniformName& terrainUniform : kTerrainUniformNames) {
+        if (strcmp(name, terrainUniform.name) == 0)
+            g_terrainUniforms[program].*terrainUniform.field = location;
+    }
     const bool log = added && g_lookupsLogged < kMaxLookupsLogged;
     if (log)
         ++g_lookupsLogged;
     ReleaseSRWLockExclusive(&g_lock);
+    if (program == g_program)
+        RefreshTerrainProgram();
 
     if (log)
         Log("uniform: program %u '%s' = location %d", program, name, location);
@@ -211,7 +316,8 @@ void ConsiderSkyRotation(const double view[16])
 {
     if (g_camera.capturedThisFrame || !g_camera.haveCorrection)
         return;
-    const double angle = camera::AngleToLastCameraDeg(view);
+    const bool replay = replay::Current() == replay::Mode::Chase;
+    const double angle = replay ? replay::AngleToCameraDeg(view) : camera::AngleToLastCameraDeg(view);
     if (g_camera.havePreview && std::fabs(angle - g_camera.skyAngle) < 0.01)
         return;  // the same rotation again (u_envmat, then the sky): already previewed
     if (angle < 0 || angle > kMaxSkyAngleDeg || (g_camera.havePreview && angle >= g_camera.skyAngle)) {
@@ -219,12 +325,31 @@ void ConsiderSkyRotation(const double view[16])
         DumpCall("^ rotation only, %.1f deg from the camera: not taken as the sky", angle);
         return;
     }
-    if (camera::PreviewRotation(view, g_camera.rotationOnly)) {
+    if (replay ? replay::PreviewRotation(view, g_camera.rotationOnly) : camera::PreviewRotation(view, g_camera.rotationOnly)) {
         g_camera.havePreview = true;
         g_camera.skyAngle = angle;
         ++g_camera.previews;
         DumpCall("^ SKY (%.2f deg from last frame's camera): orientation previewed for this frame", angle);
     }
+}
+
+// Where the chase camera is this frame, for the terrain fill: its view is C * the raw view.
+void NoteChaseCamera(const double view[16])
+{
+    double m[16];
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            double sum = 0;
+            for (int k = 0; k < 4; ++k)
+                sum += g_camera.correction[k * 4 + r] * view[c * 4 + k];
+            m[c * 4 + r] = sum;
+        }
+    }
+    for (int c = 0; c < 3; ++c) {
+        g_terrain.eye[c] = -(m[c * 4] * m[12] + m[c * 4 + 1] * m[13] + m[c * 4 + 2] * m[14]);  // -R^T t
+        g_terrain.forward[c] = -m[c * 4 + 2];                                                  // -(row 2)
+    }
+    g_terrain.haveEye = true;
 }
 
 // Returns the matrix to actually upload: value itself, or scratch holding C * value.
@@ -251,20 +376,34 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         for (int i = 0; i < 16; ++i)
             view[i] = value[i];
         g_camera.capturedThisFrame = true;
-        bike::BeginFrame(view);
-        g_camera.haveCorrection = camera::Update(view, g_camera.correction) &&
-                                  camera::RotationCorrection(g_camera.rotationOnly);
-        if (g_camera.haveCorrection) {
-            const camera::Telemetry& t = camera::LastTelemetry();
-            DumpCall("^ CAMERA  dt=%.1fms lag=%.2fdeg roll=%.2fdeg rollCorr=%.2fdeg pitchExcess=%.1fdeg "
-                     "viewPitch=%.1fdeg lookYaw=%.0fdeg airYaw=%.1fdeg air=%.2f bike=%s %s accelUp=%.2fg "
-                     "neck=%.1fmm eyeHeight%+.1fmm",
-                     t.dtMs, t.lagDeg, t.rawRollDeg, t.rollCorrectionDeg, t.pitchExcessDeg, t.viewPitchDeg,
-                     t.lookYawDeg, t.airYawDeg, t.airborne, t.bikeTracked ? "yes" : "no",
-                     t.customActive ? "CUSTOM" : "GAME", t.verticalAccelG, t.neckOffset * 1000.0,
-                     t.verticalOffset * 1000.0);
+        const replay::Mode before = replay::Current();
+        const replay::Mode mode = replay::Update(view, camera::ContentTime(), g_camera.correction, g_camera.rotationOnly);
+        if (mode != replay::Mode::Off) {
+            // A replay: the helmet cam and the bike tracker sit it out.
+            if (before == replay::Mode::Off)
+                bike::Reset();
+            g_camera.haveCorrection = mode == replay::Mode::Chase;
+            if (g_camera.haveCorrection)
+                NoteChaseCamera(view);
+            char text[256];
+            replay::Describe(text, sizeof text);
+            DumpCall("^ CAMERA  %s", text);
         } else {
-            DumpCall("^ CAMERA rejected (not a rigid view matrix)");
+            bike::BeginFrame(view);
+            g_camera.haveCorrection = camera::Update(view, g_camera.correction) &&
+                                      camera::RotationCorrection(g_camera.rotationOnly);
+            if (g_camera.haveCorrection) {
+                const camera::Telemetry& t = camera::LastTelemetry();
+                DumpCall("^ CAMERA  dt=%.1fms lag=%.2fdeg roll=%.2fdeg rollCorr=%.2fdeg pitchExcess=%.1fdeg "
+                         "viewPitch=%.1fdeg lookYaw=%.0fdeg airYaw=%.1fdeg air=%.2f bike=%s %s accelUp=%.2fg "
+                         "neck=%.1fmm eyeHeight%+.1fmm",
+                         t.dtMs, t.lagDeg, t.rawRollDeg, t.rollCorrectionDeg, t.pitchExcessDeg, t.viewPitchDeg,
+                         t.lookYawDeg, t.airYawDeg, t.airborne, t.bikeTracked ? "yes" : "no",
+                         t.customActive ? "CUSTOM" : "GAME", t.verticalAccelG, t.neckOffset * 1000.0,
+                         t.verticalOffset * 1000.0);
+            } else {
+                DumpCall("^ CAMERA rejected (not a rigid view matrix)");
+            }
         }
     } else if (!HasTranslation(value)) {
         // The sky: a rotation-only view, drawn before the terrain. Its rotation is this frame's
@@ -276,7 +415,7 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
         for (int i = 0; i < 16; ++i)
             view[i] = value[i];
         ConsiderSkyRotation(view);
-    } else if (g_camera.capturedThisFrame) {
+    } else if (g_camera.capturedThisFrame && replay::Current() == replay::Mode::Off) {
         bike::Observe(program, value);  // raw View * Model: one of the candidates for the bike
     }
     if (!g_camera.haveCorrection)
@@ -421,9 +560,22 @@ void APIENTRY Wrap_glUniform4fvARB(GLint location, GLsizei count, const GLfloat*
     real_glUniform4fvARB(location, count, CorrectLight(location, count, value, 4, scratch));
 }
 
+// Bone positions, for the chase camera in replays (only looked at during one).
+void ObserveBones(GLint location, GLsizei count, const GLfloat* value)
+{
+    if (!value || replay::Current() == replay::Mode::Off)
+        return;
+    AcquireSRWLockShared(&g_lock);
+    const bool isBones = g_boneUniforms.count(UniformKey(g_program, location)) != 0;
+    ReleaseSRWLockShared(&g_lock);
+    if (isBones)
+        replay::ObserveBones(value, count);
+}
+
 void APIENTRY Wrap_glUniform3fv(GLint location, GLsizei count, const GLfloat* value)
 {
     DumpUniform("glUniform3fv", g_program, location, count, 0, value, 3);
+    ObserveBones(location, count, value);
     GLfloat scratch[kMaxLights * 3];
     real_glUniform3fv(location, count, CorrectLight(location, count, value, 3, scratch));
 }
@@ -431,6 +583,7 @@ void APIENTRY Wrap_glUniform3fv(GLint location, GLsizei count, const GLfloat* va
 void APIENTRY Wrap_glUniform3fvARB(GLint location, GLsizei count, const GLfloat* value)
 {
     DumpUniform("glUniform3fvARB", g_program, location, count, 0, value, 3);
+    ObserveBones(location, count, value);
     GLfloat scratch[kMaxLights * 3];
     real_glUniform3fvARB(location, count, CorrectLight(location, count, value, 3, scratch));
 }
@@ -449,6 +602,219 @@ void APIENTRY Wrap_glUniformMatrix3fvARB(GLint location, GLsizei count, GLboolea
     real_glUniformMatrix3fvARB(location, count, transpose, CorrectEnvMatrix(location, count, transpose, value, scratch));
 }
 
+// ---- Terrain patches (see terrain.h) -----------------------------------------------------
+
+// The terrain program's patch uniforms (and the heightmap's, uploaded when a track loads).
+void NoteTerrainUniform(GLint location, GLsizei count, const GLfloat* value, int components)
+{
+    const TerrainUniforms& u = g_terrain.uniforms;
+    if (!value || count != 1 || location < 0)
+        return;
+    if (location == u.spacing || location == u.heightsDim) {
+        float (&last)[2] = g_heightmapUpload[location == u.spacing ? 0 : 1];
+        const float second = components > 1 ? value[1] : 0.0f;
+        if (last[0] != value[0] || last[1] != second) {
+            last[0] = value[0];
+            last[1] = second;
+            terrain::ResetMap();
+            g_variants.clear();
+            Log("terrain: %s = %g %g (a new heightmap)", location == u.spacing ? kSpacingUniform : kHeightsDimUniform,
+                value[0], second);
+            // Samples apart / 1 over samples across: the map's width.
+            if (g_heightmapUpload[0][0] > 0 && g_heightmapUpload[1][0] > 0)
+                terrain::SetMapSize(g_heightmapUpload[0][0] / g_heightmapUpload[1][0]);
+        }
+        return;
+    }
+    if (components == 2 && location == u.offset) {
+        g_terrain.current.offset[0] = value[0];
+        g_terrain.current.offset[1] = value[1];
+    } else if (components == 2 && location == u.texOffset) {
+        g_terrain.current.texOffset[0] = value[0];
+        g_terrain.current.texOffset[1] = value[1];
+    } else if (components == 1 && location == u.scale) {
+        g_terrain.current.scale = value[0];
+    } else if (components == 1 && location == u.texScale) {
+        g_terrain.current.texScale = value[0];
+    }
+}
+
+bool SamePatch(const terrain::Patch& a, const terrain::Patch& b)
+{
+    return a.offset[0] == b.offset[0] && a.offset[1] == b.offset[1] && a.scale == b.scale &&
+           a.texOffset[0] == b.texOffset[0] && a.texOffset[1] == b.texOffset[1] && a.texScale == b.texScale;
+}
+
+// The vertex array most of this pass's patches were drawn with: for filled cells whose
+// stitching has no known variant yet.
+GLuint CommonVariant()
+{
+    std::unordered_map<GLuint, int> uses;
+    GLuint best = 0;
+    int bestUses = 0;
+    for (const GamePatch& patch : g_terrain.patches) {
+        if (!patch.replayable || patch.drawCount == 0)
+            continue;
+        const int n = ++uses[patch.vao];
+        if (n > bestUses) {
+            bestUses = n;
+            best = patch.vao;
+        }
+    }
+    return best;
+}
+
+void UploadPatch(const terrain::Patch& patch)
+{
+    const TerrainUniforms& u = g_terrain.uniforms;
+    real_glUniform2fv(u.offset, 1, patch.offset);
+    real_glUniform1f(u.scale, patch.scale);
+    if (u.texOffset >= 0)
+        real_glUniform2fv(u.texOffset, 1, patch.texOffset);
+    if (u.texScale >= 0)
+        real_glUniform1f(u.texScale, patch.texScale);
+}
+
+void Replay(const DrawCall& draw)
+{
+    switch (draw.kind) {
+    case DrawCall::Elements:
+        if (real_glDrawElements)
+            real_glDrawElements(draw.mode, draw.count, draw.type, draw.indices);
+        break;
+    case DrawCall::Arrays:
+        if (real_glDrawArrays)
+            real_glDrawArrays(draw.mode, draw.first, draw.count);
+        break;
+    case DrawCall::RangeElements:
+        if (real_glDrawRangeElements)
+            real_glDrawRangeElements(draw.mode, draw.start, draw.end, draw.count, draw.type, draw.indices);
+        break;
+    }
+}
+
+// Draws the cells the game culled, after its own patches and with the same draw calls, each
+// with the vertex array variant stitched to its neighbours.
+void FillTerrain()
+{
+    if (!real_glDrawElements)
+        real_glDrawElements = reinterpret_cast<PFN_DrawElements>(GetRealGLFunction("glDrawElements"));
+    if (!real_glDrawArrays)
+        real_glDrawArrays = reinterpret_cast<PFN_DrawArrays>(GetRealGLFunction("glDrawArrays"));
+    if (!real_glUniform2fv || !real_glUniform1f)
+        return;
+
+    const int filled = terrain::Fill(g_terrain.eye, g_terrain.forward, g_filled, kMaxFilledPatches);
+    std::sort(g_filled, g_filled + filled,
+              [](const terrain::Patch& a, const terrain::Patch& b) { return a.variant < b.variant; });
+    const GLuint common = CommonVariant();
+    GLuint bound = g_vao;
+    int drawn = 0, stitched = 0;
+    for (int i = 0; i < filled; ++i) {
+        const terrain::Patch& cell = g_filled[i];
+        auto found = g_variants.find(cell.variant >= 0 ? static_cast<GLuint>(cell.variant) : common);
+        if (found == g_variants.end())
+            found = g_variants.find(common);
+        if (found == g_variants.end())
+            continue;
+        const GamePatch& variant = found->second;
+        if (variant.vao != bound) {
+            if (!real_glBindVertexArray)
+                continue;
+            real_glBindVertexArray(variant.vao);
+            bound = variant.vao;
+        }
+        UploadPatch(cell);
+        for (int d = 0; d < variant.drawCount; ++d)
+            Replay(variant.draws[d]);
+        ++drawn;
+        stitched += cell.edges != 0 && cell.variant >= 0 ? 1 : 0;
+    }
+    if (drawn > 0)
+        UploadPatch(g_terrain.current);
+    if (bound != g_vao)
+        real_glBindVertexArray(g_vao);
+    DumpCall("^ TERRAIN  %d patches drawn by the game, %d filled in behind its camera (%d stitched to bigger neighbours); "
+             "%d vertex array(s) seen, %d edge combination(s) learnt",
+             static_cast<int>(g_terrain.patches.size()), drawn, stitched, static_cast<int>(g_variants.size()),
+             terrain::LearntEdgeMasks());
+}
+
+// The game is done with the terrain program: the map learns from its patches, and in a 3rd
+// person replay the cells it culled are drawn.
+void FinishTerrainPass()
+{
+    if (g_terrain.patches.empty())
+        return;
+    if (g_program != g_mapProgram) {
+        terrain::ResetMap();
+        g_variants.clear();
+        g_mapProgram = g_program;
+    }
+    terrain::BeginPass();
+    for (const GamePatch& game : g_terrain.patches) {
+        terrain::Patch patch = game.patch;
+        if (game.replayable && game.drawCount > 0) {
+            patch.variant = static_cast<int>(game.vao);
+            g_variants[game.vao] = game;
+        }
+        terrain::AddGamePatch(patch);
+    }
+
+    if (g_variants.empty())
+        DumpCall("^ TERRAIN  can't be filled in (indices from client memory, or too many draw calls per patch)");
+    else if (GetConfig().enabled && g_terrain.haveEye && g_camera.haveCorrection && replay::Current() == replay::Mode::Chase)
+        FillTerrain();
+    g_terrain.patches.clear();
+}
+
+// Patch uploads are logged in the F10 dump.
+void APIENTRY Wrap_glUniform2fv(GLint location, GLsizei count, const GLfloat* value)
+{
+    DumpUniform("glUniform2fv", g_program, location, count, 0, value, 2);
+    NoteTerrainUniform(location, count, value, 2);
+    real_glUniform2fv(location, count, value);
+}
+
+void APIENTRY Wrap_glUniform1f(GLint location, GLfloat v0)
+{
+    if (IsDumping())
+        DumpCall("glUniform1f prog=%u loc=%d '%s' [%.3f]", g_program, location, UniformName(g_program, location).c_str(), v0);
+    NoteTerrainUniform(location, 1, &v0, 1);
+    real_glUniform1f(location, v0);
+}
+
+void APIENTRY Wrap_glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices)
+{
+    if (IsDumping() && !g_terrain.isTerrain)
+        DumpCall("glDrawRangeElements prog=%u mode=0x%X range=%u..%u count=%d", g_program, mode, start, end, count);
+    DrawCall draw;
+    draw.kind = DrawCall::RangeElements;
+    draw.mode = mode;
+    draw.start = start;
+    draw.end = end;
+    draw.count = count;
+    draw.type = type;
+    draw.indices = indices;
+    NoteDraw(draw);
+    real_glDrawRangeElements(mode, start, end, count, type, indices);
+}
+
+void APIENTRY Wrap_glBindVertexArray(GLuint array)
+{
+    g_vao = array;
+    real_glBindVertexArray(array);
+}
+
+// The element buffer belongs to the bound vertex array: a terrain draw can only be replayed
+// if its indices come from one.
+void APIENTRY Wrap_glBindBuffer(GLenum target, GLuint buffer)
+{
+    if (target == kElementArrayBuffer)
+        g_elementBuffers[g_vao] = buffer;
+    real_glBindBuffer(target, buffer);
+}
+
 struct ProcWrapper {
     const char* name;
     void*       wrapper;
@@ -465,6 +831,9 @@ const ProcWrapper kWrappers[] = {
     MXCAM_WRAP(glUniform4fv),              MXCAM_WRAP(glUniform4fvARB),
     MXCAM_WRAP(glUniform3fv),              MXCAM_WRAP(glUniform3fvARB),
     MXCAM_WRAP(glUniformMatrix3fv),        MXCAM_WRAP(glUniformMatrix3fvARB),
+    MXCAM_WRAP(glUniform2fv),              MXCAM_WRAP(glUniform1f),
+    MXCAM_WRAP(glDrawRangeElements),
+    MXCAM_WRAP(glBindVertexArray),         MXCAM_WRAP(glBindBuffer),
 };
 
 }  // namespace
@@ -546,6 +915,9 @@ void TraceFrame(bool captured)
     const bike::Pose& pose = bike::Current();
     if (!captured) {
         snprintf(line.text, sizeof line.text, "no camera\n");
+    } else if (replay::Current() != replay::Mode::Off) {
+        replay::Describe(line.text, sizeof line.text - 1);
+        strcat_s(line.text, "\n");
     } else {
         snprintf(line.text, sizeof line.text,
             "%.2f,%.2f,%d,%d,%d,%d,%d,%d,%.2f,"
@@ -574,19 +946,51 @@ void TraceFrame(bool captured)
 
 }  // namespace
 
+void NoteDraw(const DrawCall& draw)
+{
+    if (!g_terrain.isTerrain)
+        return;
+    const auto found = g_elementBuffers.find(g_vao);
+    const GLuint elementBuffer = found != g_elementBuffers.end() ? found->second : 0;
+    if (IsDumping())
+        DumpCall("%s prog=%u mode=0x%X count=%d type=0x%X offset=%p first=%d vertexArray=%u elementBuffer=%u",
+                 draw.kind == DrawCall::Elements ? "glDrawElements" : draw.kind == DrawCall::Arrays ? "glDrawArrays" : "glDrawRangeElements",
+                 g_program, draw.mode, draw.count, draw.type, draw.indices, draw.first, g_vao, elementBuffer);
+
+    std::vector<GamePatch>& patches = g_terrain.patches;
+    if (patches.empty())
+        patches.reserve(512);
+    if (patches.empty() || !SamePatch(patches.back().patch, g_terrain.current) || patches.back().vao != g_vao) {
+        patches.emplace_back();
+        patches.back().patch = g_terrain.current;
+        patches.back().vao = g_vao;
+    }
+    GamePatch& patch = patches.back();
+    if (patch.drawCount < kMaxPatchDraws)
+        patch.draws[patch.drawCount++] = draw;
+    else
+        patch.replayable = false;
+    if (draw.kind != DrawCall::Arrays && elementBuffer == 0)
+        patch.replayable = false;
+}
+
 bool EndShaderFrame()
 {
+    // A terrain pass still open at the end of the frame isn't filled in, only forgotten.
+    g_terrain.patches.clear();
+    g_terrain.haveEye = false;
     const bool captured = g_camera.capturedThisFrame;
-    if (captured)
+    if (captured && replay::Current() == replay::Mode::Off)
         bike::EndFrame(camera::ContentTime(), camera::FrameInterval());
     if (IsDumping())
         Log("  shader path: camera %s, %d '%s' uploads corrected, %d sky preview(s), %d other rotation-only draw(s)",
             captured ? "found" : "NOT found", g_camera.correctedThisFrame, GetConfig().modelviewUniform,
             g_camera.previews, g_camera.otherRotations);
     TraceFrame(captured);
+    replay::EndFrame(camera::ContentTime(), captured);
     camera::FrameTick();
 
-    // No camera this frame (menu, replay, effect off): don't carry a stale correction into the
+    // No camera this frame (menu, effect off): don't carry a stale correction into the
     // next frame's sky.
     if (!captured)
         g_camera.haveCorrection = false;

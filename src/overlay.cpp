@@ -28,6 +28,7 @@
 #include "log.h"
 #include "mathlib.h"
 #include "overlay.h"
+#include "replay.h"
 
 namespace mxcam {
 namespace {
@@ -714,7 +715,7 @@ RowDef KeyRow(int tab, const char* section, const char* label, int Config::* key
     return { tab, section, label, RowKind::Key, nullptr, nullptr, 0, 1, 1, 1, 0, "", nullptr, nullptr, nullptr, false, key };
 }
 
-const char* const kTabs[] = { "VIEW", "AIR & LOOK", "NECK FX" };
+const char* const kTabs[] = { "VIEW", "AIR & LOOK", "NECK FX", "REPLAY" };
 constexpr int kTabCount = static_cast<int>(sizeof kTabs / sizeof kTabs[0]);
 
 const RowDef kRows[] = {
@@ -742,6 +743,10 @@ const RowDef kRows[] = {
     Slider(1, "IN THE AIR",     "Looseness",           &Config::airLooseness,     0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
         .Help("In the air only: the view keeps pointing forward while the bike swings left / right "
               "(scrubs, whips), by up to 15\xB0 x this. Off follows the bike tightly."),
+    Slider(1, nullptr,          "Whip lock",           &Config::whipLock,         0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("In the air only: holds the view on your direction of travel, horizon level, at your "
+              "normal look-down angle, while the bike swings, leans and tilts under it. 100% keeps "
+              "it completely straight; it eases back onto the bike after landing."),
     Slider(1, "LOOKING AROUND", "Sideways: forward",   &Config::lookSideForward,  -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
         .Help("Custom camera: moves your eyes forward (+) or back (-) while looking left / right."),
     Slider(1, nullptr,          "Sideways: height",    &Config::lookSideHeight,   -1.0,  1.0,  0.01, 1.0,   2, " m", nullptr, true)
@@ -769,6 +774,17 @@ const RowDef kRows[] = {
         .Help("How far your head nods forward as your neck compresses on a landing."),
     Slider(2, nullptr,          "Height smoothing",    &Config::verticalResponse, 0.0,   60.0,  1.0,    1.0,    0, " /s", "Off")
         .Help("Smooths small up / down head jitter. Higher follows the bike's height more closely."),
+    // ---- REPLAY ----
+    Choice(3, "REPLAY CAMERA",  "Camera",              &Config::replayChaseCam, "GAME", "3RD PERSON")
+        .Help("GAME is the replay's own camera, which faces one way while the rider swivels in front "
+              "of it. 3RD PERSON locks the camera behind the rider, like the 3rd person view when riding."),
+    Slider(3, "3RD PERSON CAMERA", "Distance behind",  &Config::replayDistance,   0.5,   12.0,  0.1,    1.0,    1, " m")
+        .Help("3rd person replays: how far behind the rider the camera sits. Lower moves it forward, "
+              "closer to the rider."),
+    Slider(3, nullptr,          "Height",              &Config::replayHeight,     -0.5,  5.0,   0.05,   1.0,    2, " m")
+        .Help("3rd person replays: how high above the rider the camera sits."),
+    Slider(3, nullptr,          "Pitch",               &Config::replayPitchDeg,   -10.0, 45.0,  0.5,    1.0,    1, "\xB0")
+        .Help("3rd person replays: how far the camera looks down. Negative looks up."),
 };
 constexpr int kRowCount = static_cast<int>(sizeof kRows / sizeof kRows[0]);
 
@@ -1070,6 +1086,8 @@ bool RowInactive(const RowDef& def, const Config& cfg)
         return true;
     if (def.number == &Config::cameraAngleDeg && cfg.keepGameAngle)
         return true;
+    if (def.tab == 3 && def.number && !cfg.replayChaseCam)  // replay camera placement, game camera chosen
+        return true;
     return false;
 }
 
@@ -1173,19 +1191,25 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     {
         if (g_panel.selected == kTabBarItem && in.step)
             g_panel.tab = (g_panel.tab + in.step + kTabCount) % kTabCount;
-        const float tabW = innerW / kTabCount;
+        // Each tab is its label plus an equal share of the spare width, so long labels still fit.
+        float labelW[kTabCount], spare = innerW;
         for (int tab = 0; tab < kTabCount; ++tab) {
-            const float tx = x + tab * tabW;
+            labelW[tab] = TextWidth(kFontSmall, kTabs[tab], S(2));
+            spare -= labelW[tab];
+        }
+        float tx = x;
+        for (int tab = 0; tab < kTabCount; ++tab) {
+            const float tabW = labelW[tab] + spare / kTabCount;
             const bool hot = in.Inside(tx, y, tabW, tabsH - S(8));
             if (hot && in.pressed) {
                 g_panel.tab = tab;
                 g_panel.selected = kTabBarItem;
             }
             const bool current = tab == g_panel.tab;
-            const float labelW = TextWidth(kFontSmall, kTabs[tab], S(2));
-            const float lx = std::round(tx + (tabW - labelW) * 0.5f);
+            const float lx = std::round(tx + (tabW - labelW[tab]) * 0.5f);
             Text(kFontSmall, lx, y + S(6), kTabs[tab], current ? White(1.0f) : Gray(hot ? 190 : 120), S(2));
             Rect(tx + S(6), y + S(26), tabW - S(12), current ? S(2) : 1, current ? White(1.0f) : White(0.10f));
+            tx += tabW;
         }
         if (g_panel.selected == kTabBarItem)
             Marker(y + S(2), S(24));
@@ -1327,9 +1351,11 @@ void BuildPanel(int screenHeight, const Input& in, double now)
     } else if (g_panel.tab == 1) {
         snprintf(readout, sizeof readout, "%s   SWING %+.0f\xB0   LOOK %+.0f\xB0",
                  t.airborne > 0.5 ? "IN THE AIR" : "ON THE GROUND", t.airYawDeg, t.lookYawDeg);
-    } else {
+    } else if (g_panel.tab == 2) {
         snprintf(readout, sizeof readout, "LAG %.1f\xB0   %.1f G   NECK %+.0f MM", t.lagDeg,
                  1.0 + t.verticalAccelG, t.neckOffset * 1000.0);
+    } else {
+        snprintf(readout, sizeof readout, "%s", replay::StatusText());
     }
     Text(kFontSmall, x, y, readout, Gray(150), S(1));
     y += S(18) + S(18);

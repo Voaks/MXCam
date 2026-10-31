@@ -41,9 +41,11 @@ struct Pose {
     double worldUp[3]      = { 0, 1, 0 };
     // The bike model's origin in world space in the latest matched frame.
     double worldPosition[3] = {};
-    // The bike's own vertical acceleration along WorldUp, in g (free fall: -1).
+    // The bike's own vertical acceleration along WorldUp, in g (free fall: -1), and its velocity
+    // in world space (units/s).
     bool   haveAccel      = false;
     double verticalAccelG = 0;
+    double velocity[3]    = {};
 };
 
 const Pose& Current();

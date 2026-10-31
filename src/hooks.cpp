@@ -61,6 +61,8 @@ decltype(&::glScaled)            real_glScaled            = nullptr;
 decltype(&::glNewList)           real_glNewList           = nullptr;
 decltype(&::glEndList)           real_glEndList           = nullptr;
 decltype(&::glClear)             real_glClear             = nullptr;
+decltype(&::glDrawElements)      real_glDrawElements      = nullptr;
+decltype(&::glDrawArrays)        real_glDrawArrays        = nullptr;
 PFN_wglSwapBuffers               real_wglSwapBuffers      = nullptr;
 decltype(&::wglSwapLayerBuffers) real_wglSwapLayerBuffers = nullptr;
 decltype(&::wglGetProcAddress)   real_wglGetProcAddress   = nullptr;
@@ -487,6 +489,29 @@ void APIENTRY Hook_glClear(GLbitfield mask)
     real_glClear(mask);
 }
 
+void APIENTRY Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices)
+{
+    DrawCall draw;
+    draw.kind = DrawCall::Elements;
+    draw.mode = mode;
+    draw.count = count;
+    draw.type = type;
+    draw.indices = indices;
+    NoteDraw(draw);
+    real_glDrawElements(mode, count, type, indices);
+}
+
+void APIENTRY Hook_glDrawArrays(GLenum mode, GLint first, GLsizei count)
+{
+    DrawCall draw;
+    draw.kind = DrawCall::Arrays;
+    draw.mode = mode;
+    draw.first = first;
+    draw.count = count;
+    NoteDraw(draw);
+    real_glDrawArrays(mode, first, count);
+}
+
 // The settings panel is drawn into the finished frame, right before it is presented.
 BOOL WINAPI Hook_wglSwapBuffers(HDC dc)
 {
@@ -530,6 +555,7 @@ const HookEntry* GetHookTable(size_t& count)
         MXCAM_HOOK(glScalef),       MXCAM_HOOK(glScaled),
         MXCAM_HOOK(glNewList),      MXCAM_HOOK(glEndList),
         MXCAM_HOOK(glClear),
+        MXCAM_HOOK(glDrawElements), MXCAM_HOOK(glDrawArrays),
         MXCAM_HOOK(wglSwapBuffers), MXCAM_HOOK(wglSwapLayerBuffers),
         MXCAM_HOOK(wglGetProcAddress),
     };
