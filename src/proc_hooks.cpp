@@ -64,6 +64,7 @@ using PFN_Uniform3fv              = PFN_Uniform4fv;
 using PFN_UniformMatrix3fv        = PFN_UniformMatrix4fv;
 using PFN_Uniform2fv              = PFN_Uniform4fv;
 using PFN_Uniform1f               = void (APIENTRY*)(GLint location, GLfloat v0);
+using PFN_Uniform1i               = void (APIENTRY*)(GLint location, GLint v0);
 using PFN_DrawRangeElements       = void (APIENTRY*)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices);
 using PFN_BindVertexArray         = void (APIENTRY*)(GLuint array);
 using PFN_BindBuffer              = void (APIENTRY*)(GLenum target, GLuint buffer);
@@ -87,6 +88,7 @@ PFN_UniformMatrix3fv        real_glUniformMatrix3fv        = nullptr;
 PFN_UniformMatrix3fv        real_glUniformMatrix3fvARB     = nullptr;
 PFN_Uniform2fv              real_glUniform2fv              = nullptr;
 PFN_Uniform1f               real_glUniform1f               = nullptr;
+PFN_Uniform1i               real_glUniform1i               = nullptr;
 PFN_DrawRangeElements       real_glDrawRangeElements       = nullptr;
 PFN_BindVertexArray         real_glBindVertexArray         = nullptr;
 PFN_BindBuffer              real_glBindBuffer              = nullptr;
@@ -108,6 +110,37 @@ std::unordered_set<unsigned long long> g_boneUniforms;           // (program, lo
 std::unordered_set<GLuint> g_cameraPrograms;                     // programs that draw the terrain
 int     g_lookupsLogged = 0;
 GLuint  g_program = 0;                                           // program bound by glUseProgram
+
+// Hiding your own torso and head (Config::hideOwnBody). Riders are skinned meshes: per bone,
+// v = u_bone_r * (position - u_bone_c) + u_bone_t, blended by weight. The rider has 9 bones
+// (forearms, upper arms, shins, thighs) and one on the body's midline that carries the torso,
+// the head and the helmet. That bone is shrunk to a speck at the eye: what it alone moves ends up
+// behind the near plane, and a vertex it shares with an arm or a leg lands on the line from the
+// eye to where the arm or leg puts it, so on screen it stays exactly there and nothing stretches.
+// Only your own rider: the one whose torso has the game's eye in its head. Other riders, and
+// anything drawn from another viewpoint (3rd person views), keep their bodies.
+constexpr char    kBoneCentreUniform[]   = "u_bone_c";
+constexpr char    kBoneRotationUniform[] = "u_bone_r";
+constexpr char    kBoneCountUniform[]    = "u_nbones";
+constexpr int     kMaxBones = 32;
+constexpr GLfloat kHiddenBoneScale = 1e-3f;
+
+struct SkinnedProgram {
+    GLint   centreLoc = -1, positionLoc = -1, rotationLoc = -1, countLoc = -1, modelviewLoc = -1;
+    int     bones = 0;                              // the last u_nbones (0: a rigid draw)
+    GLfloat centre[kMaxBones * 3]   = {};           // the game's uploads, as sent
+    GLfloat position[kMaxBones * 3] = {};
+    GLfloat rotation[kMaxBones * 9] = {};
+    int     centres = 0, positions = 0, rotations = 0;
+    bool    transposed = false;
+    bool    positionArb = false, rotationArb = false;
+    GLfloat rawView[16]  = {};                      // the game's last u_modelview
+    GLfloat usedView[16] = {};                      // what was uploaded for it (ours, corrected)
+    bool    haveView = false;
+    bool    positionEdited = false, rotationEdited = false;  // the program holds our arrays, not the game's
+};
+std::unordered_map<GLuint, SkinnedProgram> g_skinned;  // by program; nodes stay put, so pointers last
+bool g_hidingLogged = false;
 
 struct ShaderCamera {
     bool   haveCorrection    = false;  // the camera was found (this frame, or last frame until it is)
@@ -249,6 +282,16 @@ void NoteUniformLocation(GLuint program, const GLchar* name, GLint location)
         g_envUniforms.insert(key);
     if (strcmp(name, kBoneUniform) == 0)
         g_boneUniforms.insert(key);
+    if (strcmp(name, kBoneCentreUniform) == 0)
+        g_skinned[program].centreLoc = location;
+    if (strcmp(name, kBoneUniform) == 0)
+        g_skinned[program].positionLoc = location;
+    if (strcmp(name, kBoneRotationUniform) == 0)
+        g_skinned[program].rotationLoc = location;
+    if (strcmp(name, kBoneCountUniform) == 0)
+        g_skinned[program].countLoc = location;
+    if (strcmp(name, cfg.modelviewUniform) == 0)
+        g_skinned[program].modelviewLoc = location;
     if (strcmp(name, cfg.cameraProgramUniform) == 0)
         g_cameraPrograms.insert(program);
     for (const TerrainUniformName& terrainUniform : kTerrainUniformNames) {
@@ -469,6 +512,187 @@ const GLfloat* CorrectModelview(GLuint program, GLint location, GLsizei count, G
     return scratch;
 }
 
+// ---- Your own torso and head (see SkinnedProgram) -----------------------------------------
+SkinnedProgram* FindSkinned(GLuint program)
+{
+    AcquireSRWLockShared(&g_lock);
+    const auto found = g_skinned.find(program);
+    SkinnedProgram* skin = found != g_skinned.end() ? &found->second : nullptr;
+    ReleaseSRWLockShared(&g_lock);
+    return skin;
+}
+
+void NoteSkinnedView(GLuint program, GLint location, GLsizei count, GLboolean transpose,
+                     const GLfloat* value, const GLfloat* uploaded)
+{
+    SkinnedProgram* skin = value ? FindSkinned(program) : nullptr;
+    if (!skin || location != skin->modelviewLoc || location < 0 || count != 1 || transpose)
+        return;
+    std::copy(value, value + 16, skin->rawView);
+    std::copy(uploaded, uploaded + 16, skin->usedView);
+    skin->haveView = true;
+}
+
+void NoteSkinnedCount(GLint location, GLint value)
+{
+    SkinnedProgram* skin = FindSkinned(g_program);
+    if (skin && location == skin->countLoc && location >= 0)
+        skin->bones = value;
+}
+
+// Bone centres and positions (vec3 arrays).
+void NoteSkinnedVectors(GLint location, GLsizei count, const GLfloat* value, bool arb)
+{
+    SkinnedProgram* skin = value ? FindSkinned(g_program) : nullptr;
+    if (!skin || location < 0 || count <= 0)
+        return;
+    const int n = std::min<int>(count, kMaxBones);
+    if (location == skin->centreLoc) {
+        std::copy(value, value + n * 3, skin->centre);
+        skin->centres = n;
+    } else if (location == skin->positionLoc) {
+        std::copy(value, value + n * 3, skin->position);
+        skin->positions = n;
+        skin->positionArb = arb;
+        skin->positionEdited = false;
+    }
+}
+
+void NoteSkinnedRotations(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value, bool arb)
+{
+    SkinnedProgram* skin = value ? FindSkinned(g_program) : nullptr;
+    if (!skin || location != skin->rotationLoc || location < 0 || count <= 0)
+        return;
+    const int n = std::min<int>(count, kMaxBones);
+    std::copy(value, value + n * 9, skin->rotation);
+    skin->rotations = n;
+    skin->transposed = transpose != GL_FALSE;
+    skin->rotationArb = arb;
+    skin->rotationEdited = false;
+}
+
+// The eye of a rigid modelview, in the space it maps from (column-major: -R^T t).
+void EyeOf(const GLfloat* m, double eye[3])
+{
+    for (int i = 0; i < 3; ++i)
+        eye[i] = -(double(m[i * 4]) * m[12] + double(m[i * 4 + 1]) * m[13] + double(m[i * 4 + 2]) * m[14]);
+}
+
+// Picks the bones on the body's midline (the torso and head) and says whether this is your own
+// rider: the game's eye, taken back into the torso bone's rest pose, has to sit in its head
+// (a capture had it at +0.04 +2.19 -0.82, half-span 1.46: centred, above the shoulders, forward).
+// Sizes are in units of the skeleton's half-span (the outermost arm bone), so scale doesn't matter.
+bool OwnTorso(const SkinnedProgram& skin, int bones, bool hidden[kMaxBones], double rest[3], double* size)
+{
+    double halfSpan = 0;
+    for (int b = 0; b < bones; ++b)
+        halfSpan = std::max(halfSpan, std::fabs(double(skin.centre[b * 3])));
+    *size = halfSpan;
+    if (halfSpan < 1e-3)
+        return false;
+    int torso = -1, midline = 0;
+    for (int b = 0; b < bones; ++b) {
+        hidden[b] = std::fabs(skin.centre[b * 3]) <= 0.05 * halfSpan;
+        if (!hidden[b])
+            continue;
+        ++midline;
+        if (torso < 0 || skin.centre[b * 3 + 1] > skin.centre[torso * 3 + 1])
+            torso = b;  // the highest one carries the head
+    }
+    if (torso < 0 || midline == bones)
+        return false;
+
+    double eye[3];
+    EyeOf(skin.rawView, eye);
+    const GLfloat* r = skin.rotation + torso * 9;
+    double offset[3];
+    for (int i = 0; i < 3; ++i)
+        offset[i] = eye[i] - skin.position[torso * 3 + i];
+    for (int i = 0; i < 3; ++i) {  // R^T (eye - t): the eye relative to the bone's centre, at rest
+        double sum = 0;
+        for (int k = 0; k < 3; ++k)
+            sum += (skin.transposed ? r[k * 3 + i] : r[i * 3 + k]) * offset[k];
+        rest[i] = sum;
+    }
+    return std::fabs(rest[0]) < 0.45 * halfSpan && std::fabs(rest[2]) < 1.2 * halfSpan &&
+           rest[1] > 0.6 * halfSpan && rest[1] < 2.5 * halfSpan;
+}
+
+void UploadSkinnedVectors(GLint location, GLsizei count, const GLfloat* value, bool arb)
+{
+    PFN_Uniform3fv upload = arb && real_glUniform3fvARB ? real_glUniform3fvARB : real_glUniform3fv;
+    if (!upload)
+        upload = real_glUniform3fvARB;
+    if (upload)
+        upload(location, count, value);
+}
+
+void UploadSkinnedRotations(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value, bool arb)
+{
+    PFN_UniformMatrix3fv upload = arb && real_glUniformMatrix3fvARB ? real_glUniformMatrix3fvARB : real_glUniformMatrix3fv;
+    if (!upload)
+        upload = real_glUniformMatrix3fvARB;
+    if (upload)
+        upload(location, count, transpose, value);
+}
+
+// Right before each draw: for your own rider, swap in the hidden torso; otherwise make sure the
+// program holds the game's own bones again.
+void PrepareSkinnedDraw()
+{
+    SkinnedProgram* skin = FindSkinned(g_program);
+    if (!skin || skin->centreLoc < 0 || skin->positionLoc < 0 || skin->rotationLoc < 0)
+        return;
+    const int bones = skin->bones;
+    const bool complete = bones > 0 && bones <= kMaxBones && skin->centres >= bones &&
+                          skin->positions >= bones && skin->rotations >= bones && skin->haveView;
+    if (!complete && !skin->positionEdited && !skin->rotationEdited)
+        return;
+
+    const Config& cfg = GetConfig();
+    bool hidden[kMaxBones] = {};
+    double rest[3] = {}, size = 0;
+    const bool own = complete && OwnTorso(*skin, bones, hidden, rest, &size);
+    const bool hide = own && cfg.enabled && cfg.hideOwnBody;
+    if (complete && IsDumping())
+        DumpCall("^ RIDER prog=%u bones=%d: eye in the torso's rest frame %+.2f %+.2f %+.2f (half-span %.2f): %s",
+                 g_program, bones, rest[0], rest[1], rest[2], size,
+                 own ? (hide ? "yours, torso and head hidden" : "yours") : "someone else's / another view");
+
+    if (hide) {
+        double eye[3];
+        EyeOf(skin->usedView, eye);  // the eye the frame is actually drawn from
+        GLfloat position[kMaxBones * 3], rotation[kMaxBones * 9];
+        std::copy(skin->position, skin->position + skin->positions * 3, position);
+        std::copy(skin->rotation, skin->rotation + skin->rotations * 9, rotation);
+        for (int b = 0; b < bones; ++b) {
+            if (!hidden[b])
+                continue;
+            for (int i = 0; i < 3; ++i)
+                position[b * 3 + i] = static_cast<GLfloat>(eye[i]);
+            for (int i = 0; i < 9; ++i)
+                rotation[b * 9 + i] *= kHiddenBoneScale;
+        }
+        UploadSkinnedVectors(skin->positionLoc, skin->positions, position, skin->positionArb);
+        UploadSkinnedRotations(skin->rotationLoc, skin->rotations, skin->transposed, rotation, skin->rotationArb);
+        skin->positionEdited = skin->rotationEdited = true;
+        if (!g_hidingLogged) {
+            g_hidingLogged = true;
+            int count = 0;
+            for (int b = 0; b < bones; ++b)
+                count += hidden[b] ? 1 : 0;
+            Log("rider: hiding your torso and head (%d of %d bones; the eye sits %+.2f %+.2f %+.2f from the torso bone)",
+                count, bones, rest[0], rest[1], rest[2]);
+        }
+        return;
+    }
+    if (skin->positionEdited)
+        UploadSkinnedVectors(skin->positionLoc, skin->positions, skin->position, skin->positionArb);
+    if (skin->rotationEdited)
+        UploadSkinnedRotations(skin->rotationLoc, skin->rotations, skin->transposed, skin->rotation, skin->rotationArb);
+    skin->positionEdited = skin->rotationEdited = false;
+}
+
 // ---- Wrappers ----------------------------------------------------------------------------
 void APIENTRY Wrap_glUseProgram(GLuint program)
 {
@@ -502,21 +726,27 @@ void APIENTRY Wrap_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean t
 {
     DumpUniform("glUniformMatrix4fv", g_program, location, count, transpose, value, 16);
     GLfloat scratch[16];
-    real_glUniformMatrix4fv(location, count, transpose, CorrectModelview(g_program, location, count, transpose, value, scratch));
+    const GLfloat* uploaded = CorrectModelview(g_program, location, count, transpose, value, scratch);
+    NoteSkinnedView(g_program, location, count, transpose, value, uploaded);
+    real_glUniformMatrix4fv(location, count, transpose, uploaded);
 }
 
 void APIENTRY Wrap_glUniformMatrix4fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
 {
     DumpUniform("glUniformMatrix4fvARB", g_program, location, count, transpose, value, 16);
     GLfloat scratch[16];
-    real_glUniformMatrix4fvARB(location, count, transpose, CorrectModelview(g_program, location, count, transpose, value, scratch));
+    const GLfloat* uploaded = CorrectModelview(g_program, location, count, transpose, value, scratch);
+    NoteSkinnedView(g_program, location, count, transpose, value, uploaded);
+    real_glUniformMatrix4fvARB(location, count, transpose, uploaded);
 }
 
 void APIENTRY Wrap_glProgramUniformMatrix4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
 {
     DumpUniform("glProgramUniformMatrix4fv", program, location, count, transpose, value, 16);
     GLfloat scratch[16];
-    real_glProgramUniformMatrix4fv(program, location, count, transpose, CorrectModelview(program, location, count, transpose, value, scratch));
+    const GLfloat* uploaded = CorrectModelview(program, location, count, transpose, value, scratch);
+    NoteSkinnedView(program, location, count, transpose, value, uploaded);
+    real_glProgramUniformMatrix4fv(program, location, count, transpose, uploaded);
 }
 
 // Light directions (and positions) arrive in the game's eye space; returns them turned into
@@ -610,6 +840,7 @@ void APIENTRY Wrap_glUniform3fv(GLint location, GLsizei count, const GLfloat* va
 {
     DumpUniform("glUniform3fv", g_program, location, count, 0, value, 3);
     ObserveBones(location, count, value);
+    NoteSkinnedVectors(location, count, value, false);
     GLfloat scratch[kMaxLights * 3];
     real_glUniform3fv(location, count, CorrectLight(location, count, value, 3, scratch));
 }
@@ -618,6 +849,7 @@ void APIENTRY Wrap_glUniform3fvARB(GLint location, GLsizei count, const GLfloat*
 {
     DumpUniform("glUniform3fvARB", g_program, location, count, 0, value, 3);
     ObserveBones(location, count, value);
+    NoteSkinnedVectors(location, count, value, true);
     GLfloat scratch[kMaxLights * 3];
     real_glUniform3fvARB(location, count, CorrectLight(location, count, value, 3, scratch));
 }
@@ -625,6 +857,7 @@ void APIENTRY Wrap_glUniform3fvARB(GLint location, GLsizei count, const GLfloat*
 void APIENTRY Wrap_glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
 {
     DumpUniform("glUniformMatrix3fv", g_program, location, count, transpose, value, 9);
+    NoteSkinnedRotations(location, count, transpose, value, false);
     GLfloat scratch[9];
     real_glUniformMatrix3fv(location, count, transpose, CorrectEnvMatrix(location, count, transpose, value, scratch));
 }
@@ -632,6 +865,7 @@ void APIENTRY Wrap_glUniformMatrix3fv(GLint location, GLsizei count, GLboolean t
 void APIENTRY Wrap_glUniformMatrix3fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value)
 {
     DumpUniform("glUniformMatrix3fvARB", g_program, location, count, transpose, value, 9);
+    NoteSkinnedRotations(location, count, transpose, value, true);
     GLfloat scratch[9];
     real_glUniformMatrix3fvARB(location, count, transpose, CorrectEnvMatrix(location, count, transpose, value, scratch));
 }
@@ -833,6 +1067,14 @@ void APIENTRY Wrap_glUniform1f(GLint location, GLfloat v0)
     real_glUniform1f(location, v0);
 }
 
+void APIENTRY Wrap_glUniform1i(GLint location, GLint v0)
+{
+    if (IsDumping())
+        DumpCall("glUniform1i prog=%u loc=%d '%s' [%d]", g_program, location, UniformName(g_program, location).c_str(), v0);
+    NoteSkinnedCount(location, v0);
+    real_glUniform1i(location, v0);
+}
+
 void APIENTRY Wrap_glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices)
 {
     if (IsDumping() && !g_terrain.isTerrain)
@@ -881,6 +1123,7 @@ const ProcWrapper kWrappers[] = {
     MXCAM_WRAP(glUniform3fv),              MXCAM_WRAP(glUniform3fvARB),
     MXCAM_WRAP(glUniformMatrix3fv),        MXCAM_WRAP(glUniformMatrix3fvARB),
     MXCAM_WRAP(glUniform2fv),              MXCAM_WRAP(glUniform1f),
+    MXCAM_WRAP(glUniform1i),
     MXCAM_WRAP(glDrawRangeElements),
     MXCAM_WRAP(glBindVertexArray),         MXCAM_WRAP(glBindBuffer),
 };
@@ -1001,8 +1244,10 @@ void TraceFrame(bool captured)
 
 void NoteDraw(const DrawCall& draw)
 {
-    if (!g_terrain.isTerrain)
+    if (!g_terrain.isTerrain) {
+        PrepareSkinnedDraw();
         return;
+    }
     const auto found = g_elementBuffers.find(g_vao);
     const GLuint elementBuffer = found != g_elementBuffers.end() ? found->second : 0;
     if (IsDumping())

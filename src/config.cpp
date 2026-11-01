@@ -94,6 +94,7 @@ bool SaveConfig()
         { L"Camera",    L"CameraAngleDeg",       g_config.cameraAngleDeg },
         { L"Camera",    L"HeadForward",          g_config.headForward },
         { L"Camera",    L"HeadHeight",           g_config.headHeight },
+        { L"Camera",    L"HideOwnBody",          g_config.hideOwnBody ? 1.0 : 0.0 },
         { L"Smoothing", L"RotationResponse",     g_config.rotationResponse },
         { L"Smoothing", L"MaxLagDeg",            g_config.maxLagDeg },
         { L"Leveling",  L"HorizonLock",          g_config.horizonLock },
@@ -149,6 +150,7 @@ void ResetTunables()
     g_config.cameraAngleDeg       = defaults.cameraAngleDeg;
     g_config.headForward          = defaults.headForward;
     g_config.headHeight           = defaults.headHeight;
+    g_config.hideOwnBody          = defaults.hideOwnBody;
     g_config.rotationResponse     = defaults.rotationResponse;
     g_config.maxLagDeg            = defaults.maxLagDeg;
     g_config.horizonLock          = defaults.horizonLock;
@@ -219,6 +221,7 @@ void ReloadConfig()
     c.cameraAngleDeg = ReadDouble(L"Camera", L"CameraAngleDeg", c.cameraAngleDeg);
     c.headForward    = ReadDouble(L"Camera", L"HeadForward", c.headForward);
     c.headHeight     = ReadDouble(L"Camera", L"HeadHeight", c.headHeight);
+    c.hideOwnBody    = ReadInt(L"Camera", L"HideOwnBody", c.hideOwnBody) != 0;
 
     c.rotationResponse = ReadDouble(L"Smoothing", L"RotationResponse", c.rotationResponse);
     c.maxLagDeg        = ReadDouble(L"Smoothing", L"MaxLagDeg", c.maxLagDeg);

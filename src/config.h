@@ -33,6 +33,7 @@ struct Config {
     double cameraAngleDeg = 8.0;          // custom camera: look-down angle (positive = down)
     double headForward    = 0.0;          // eye offset along the bike, units (+ = forward)
     double headHeight     = 0.0;          // eye offset along the bike's up axis (+ = up)
+    bool   hideOwnBody    = false;        // hide your own rider's torso and head (for high FOVs)
 
     // [Smoothing]
     double rotationResponse = 14.0;       // 1/s, 0 = off
