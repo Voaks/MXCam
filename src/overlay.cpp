@@ -740,7 +740,7 @@ const RowDef kRows[] = {
     Slider(0, nullptr,          "Pitch lock",          &Config::pitchLock,        0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
         .Help("How much of the bike's nose up / down tilt (wheelies, jump faces) is removed. 0% tilts "
               "with the bike, 100% keeps the view steady."),
-    Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -0.6,  0.6,  0.01, 1.0,   2, " m")
+    Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -3.0,  3.0,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes forward (+) or back (-) along the bike."),
     Slider(0, nullptr,          "Head height",         &Config::headHeight,       -0.6,  0.6,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes up (+) or down (-)."),
