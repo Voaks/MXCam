@@ -277,7 +277,7 @@ void ReloadConfig()
     c.lookTurnSpeed        = Clamp(c.lookTurnSpeed, 2.0, 40.0);
     c.apexLook             = Clamp(c.apexLook, 0.0, 1.0);
     c.apexSpeed            = Clamp(c.apexSpeed, 0.5, 5.0);
-    c.apexAnticipation     = Clamp(c.apexAnticipation, 0.0, 0.5);
+    c.apexAnticipation     = 0.0;  // work in progress: off for now, whatever the ini says
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);

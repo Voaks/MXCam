@@ -585,7 +585,8 @@ int main(int argc, char** argv)
     const ApexResult apexHalf = ApexCorner(0.5, 60.0), apexLeft = ApexCorner(1.0, -60.0);
     const ApexResult apexSlow = ApexCorner(1.0, 60.0, 2.0);
     // Real corners in traces opened up over a second or more; a quick exit leaves little to forecast.
-    const ApexResult apexGradual = ApexCorner(1.0, 60.0, kSpeed, Config{}.apexAnticipation, 1.5);
+    // Anticipation is locked off in the panel for now (work in progress); this tests it at 0.25 s.
+    const ApexResult apexGradual = ApexCorner(1.0, 60.0, kSpeed, 0.25, 1.5);
     const ApexResult apexLate = ApexCorner(1.0, 60.0, kSpeed, 0.0, 1.5);
     printf("  head turned into the corner: off %+.1f, 100%% right %+.1f (view %+.1f), 50%% %+.1f, 100%% left %+.1f, "
            "walking pace %+.1f deg\n", apexOff.inTurn, apexRight.inTurn, apexRight.viewInTurn,

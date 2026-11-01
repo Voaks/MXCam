@@ -683,11 +683,18 @@ struct RowDef {
     bool             customOnly;  // only does something with the custom camera
     int Config::*    key = nullptr;  // Key: a virtual-key code, picked by pressing the key
     const char*      help = nullptr; // shown beside the panel while the row is selected / under the mouse
+    bool             locked = false; // work in progress: drawn dimmed and can't be changed
 
     RowDef Help(const char* text) const
     {
         RowDef def = *this;
         def.help = text;
+        return def;
+    }
+    RowDef Locked() const
+    {
+        RowDef def = *this;
+        def.locked = true;
         return def;
     }
 };
@@ -755,10 +762,12 @@ const RowDef kRows[] = {
         .Help("How quickly the head turns toward the apex and back to straight ahead after the "
               "corner. It eases in and out gently either way; lower is more gradual: 2.5 takes "
               "about a second to settle, 1 about three. Too low and it lags behind short corners."),
-    Slider(1, nullptr,          "Anticipation",        &Config::apexAnticipation, 0.0,   0.5,  0.05, 1.0,  2, " s", "Off")
-        .Help("How early the head turns: it reads where the corner is going this far ahead. Higher "
-              "turns in sooner as a corner tightens and comes back to straight ahead sooner as it "
-              "opens up on the exit. Off waits for the bike to turn."),
+    Slider(1, nullptr,          "Anticipation",        &Config::apexAnticipation, 0.0,   0.5,  0.05, 1.0,  2, " s",
+           "Work in progress")
+        .Help("Work in progress, off for now. It will set how early the head turns: reading where the "
+              "corner is going, so it turns in sooner as a corner tightens and comes back to straight "
+              "ahead sooner as it opens up on the exit.")
+        .Locked(),
     Toggle(1, "LOOKING AROUND", "D-pad look",          &Config::controllerLook)
         .Help("Look around with a controller's d-pad: left / right to look sideways, down to look "
               "behind. Release to look ahead again."),
@@ -1102,7 +1111,7 @@ void SetFlag(bool& flag, bool wanted)
 // Rows that currently have no effect are drawn dimmed (they can still be adjusted).
 bool RowInactive(const RowDef& def, const Config& cfg)
 {
-    if (def.customOnly && !cfg.customCamera)
+    if (def.locked || (def.customOnly && !cfg.customCamera))
         return true;
     if (def.number == &Config::cameraAngleDeg && cfg.keepGameAngle)
         return true;
@@ -1268,11 +1277,11 @@ void BuildPanel(int screenHeight, const Input& in, double now)
 
         if (def.kind == RowKind::Slider) {
             double& value = cfg.*def.number;
-            if (hot && in.pressed)
+            if (hot && in.pressed && !def.locked)
                 g_panel.dragging = i;
             if (active && in.down)
                 SetSlider(def, value, def.min + Clamp((in.mx - x) / innerW, 0.0f, 1.0f) * (def.max - def.min));
-            if (focused && in.step)
+            if (focused && in.step && !def.locked)
                 SetSlider(def, value, value + in.step * def.step * (in.coarse ? 10 : 1));
 
             char text[32];
