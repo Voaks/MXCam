@@ -51,6 +51,9 @@ struct Config {
     bool   controllerLook  = true;
     double lookSideDeg     = 90.0;        // how far left / right looks turn the head
     double lookTurnSpeed   = 12.0;        // 1/s how quickly the head turns (12: 90 deg in about 0.25 s)
+    double apexLook        = 0.0;         // 0..1 in corners the head turns toward the apex
+    double apexSpeed       = 2.5;         // 1/s how quickly it turns in and back out
+    double apexAnticipation = 0.25;       // s how far ahead it reads the corner: turns in and back out sooner
     // extra eye offsets while looking sideways / back (custom camera)
     double lookSideForward = 0.0;
     double lookSideHeight  = 0.0;

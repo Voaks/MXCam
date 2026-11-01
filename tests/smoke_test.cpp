@@ -171,6 +171,7 @@ int main(int argc, char** argv)
             screenshot = argv[i];
     }
     g_headHeight = custom ? 0.1 : 0.0;
+    setvbuf(stdout, nullptr, _IONBF, 0);  // a crash still shows how far the checks got
 
     SetEnvironmentVariableA("MXCAM_TEST_OPEN_MENU", "1");
     HMODULE dll = LoadLibraryA(argv[1]);

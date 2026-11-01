@@ -104,6 +104,9 @@ bool SaveConfig()
         { L"Look",      L"ControllerLook",       g_config.controllerLook ? 1.0 : 0.0 },
         { L"Look",      L"LookSideDeg",          g_config.lookSideDeg },
         { L"Look",      L"LookTurnSpeed",        g_config.lookTurnSpeed },
+        { L"Look",      L"ApexLook",             g_config.apexLook },
+        { L"Look",      L"ApexSpeed",            g_config.apexSpeed },
+        { L"Look",      L"ApexAnticipation",     g_config.apexAnticipation },
         { L"Look",      L"LookSideForward",      g_config.lookSideForward },
         { L"Look",      L"LookSideHeight",       g_config.lookSideHeight },
         { L"Look",      L"LookBackForward",      g_config.lookBackForward },
@@ -156,6 +159,9 @@ void ResetTunables()
     g_config.controllerLook       = defaults.controllerLook;
     g_config.lookSideDeg          = defaults.lookSideDeg;
     g_config.lookTurnSpeed        = defaults.lookTurnSpeed;
+    g_config.apexLook             = defaults.apexLook;
+    g_config.apexSpeed            = defaults.apexSpeed;
+    g_config.apexAnticipation     = defaults.apexAnticipation;
     g_config.lookSideForward      = defaults.lookSideForward;
     g_config.lookSideHeight       = defaults.lookSideHeight;
     g_config.lookBackForward      = defaults.lookBackForward;
@@ -229,6 +235,9 @@ void ReloadConfig()
     c.controllerLook  = ReadInt(L"Look", L"ControllerLook", c.controllerLook) != 0;
     c.lookSideDeg     = ReadDouble(L"Look", L"LookSideDeg", c.lookSideDeg);
     c.lookTurnSpeed   = ReadDouble(L"Look", L"LookTurnSpeed", c.lookTurnSpeed);
+    c.apexLook        = ReadDouble(L"Look", L"ApexLook", c.apexLook);
+    c.apexSpeed       = ReadDouble(L"Look", L"ApexSpeed", c.apexSpeed);
+    c.apexAnticipation = ReadDouble(L"Look", L"ApexAnticipation", c.apexAnticipation);
     c.lookSideForward = ReadDouble(L"Look", L"LookSideForward", c.lookSideForward);
     c.lookSideHeight  = ReadDouble(L"Look", L"LookSideHeight", c.lookSideHeight);
     c.lookBackForward = ReadDouble(L"Look", L"LookBackForward", c.lookBackForward);
@@ -266,6 +275,9 @@ void ReloadConfig()
     c.whipLock             = Clamp(c.whipLock, 0.0, 1.0);
     c.lookSideDeg          = Clamp(c.lookSideDeg, 10.0, 90.0);
     c.lookTurnSpeed        = Clamp(c.lookTurnSpeed, 2.0, 40.0);
+    c.apexLook             = Clamp(c.apexLook, 0.0, 1.0);
+    c.apexSpeed            = Clamp(c.apexSpeed, 0.5, 5.0);
+    c.apexAnticipation     = Clamp(c.apexAnticipation, 0.0, 0.5);
     c.lookSideForward      = Clamp(c.lookSideForward, -5.0, 5.0);
     c.lookSideHeight       = Clamp(c.lookSideHeight, -5.0, 5.0);
     c.lookBackForward      = Clamp(c.lookBackForward, -5.0, 5.0);

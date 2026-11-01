@@ -747,6 +747,18 @@ const RowDef kRows[] = {
         .Help("In the air only: holds the view on your direction of travel, horizon level, at your "
               "normal look-down angle, while the bike swings, leans and tilts under it. 100% keeps "
               "it completely straight; it eases back onto the bike after landing."),
+    Slider(1, "CORNERS",        "Look to apex",        &Config::apexLook,         0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("In corners the head turns toward the apex, the way the bike is turning: more the "
+              "tighter the corner. Higher looks further into the turn (100% looks about a second "
+              "down your line, at most 45\xB0). Off at walking pace and in the air."),
+    Slider(1, nullptr,          "Apex turn speed",     &Config::apexSpeed,        0.5,   5.0,  0.5, 1.0,   1, "")
+        .Help("How quickly the head turns toward the apex and back to straight ahead after the "
+              "corner. It eases in and out gently either way; lower is more gradual: 2.5 takes "
+              "about a second to settle, 1 about three. Too low and it lags behind short corners."),
+    Slider(1, nullptr,          "Anticipation",        &Config::apexAnticipation, 0.0,   0.5,  0.05, 1.0,  2, " s", "Off")
+        .Help("How early the head turns: it reads where the corner is going this far ahead. Higher "
+              "turns in sooner as a corner tightens and comes back to straight ahead sooner as it "
+              "opens up on the exit. Off waits for the bike to turn."),
     Toggle(1, "LOOKING AROUND", "D-pad look",          &Config::controllerLook)
         .Help("Look around with a controller's d-pad: left / right to look sideways, down to look "
               "behind. Release to look ahead again."),

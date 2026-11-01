@@ -126,6 +126,41 @@ constexpr int    kTravelSamples  = 128;   // frames of history: covers it up to 
 // (the eye's path) can't turn it.
 constexpr double kPathRunMin = 3.0, kPathRunFull = 10.0;  // units
 constexpr double kPathResponse = 4.0;                     // 1/s
+
+// Look to apex: the head turns into a corner by the path's turn rate times this (s, at 100%),
+// up to about kApexMaxDeg. A point on the path t seconds ahead lies half the heading change over
+// those t off the nose, so 100% looks about 1.2 s down the path. Faded out at walking pace (a turn
+// on the spot isn't a corner), in the air and while the d-pad turns the head.
+// The head follows on a critically damped spring: an exponential ease sets off at full speed the
+// moment the corner ends, which read as a snap back. The spring's frequency is Config::apexSpeed
+// times kApexSpringScale, which settles in about the time the exponential took.
+// Coming back out, the head turns against the way the bike turned. While the bike is still turning
+// under it that reads as the eyes holding on the exit, so it may unwind kApexReturnScale times
+// faster, up to the path's own turn rate. Past that it's the view swinging back on the straight
+// (it read as a snap at 15 deg/s, from 20 deg at a corner's exit in a trace), so the rest drifts
+// home at no more than Config::apexSpeed times kApexDriftScale, eased in and out. Replaying that
+// trace: 4 deg/s of swing instead of 15, and home 1.5 s sooner. The limit is lifted for a turn the
+// other way (an S-bend) and while the d-pad turns the head.
+// Anticipation: the head aims by the turn rate Config::apexAnticipation seconds ahead, from how
+// fast the rate is changing (the gap between two filters of it). It turns in as a corner tightens
+// and, more to the point, unwinds as it opens up, while the bike's turn still absorbs it. A
+// forecast that crosses zero is held at zero, as a corner easing off forecasts the next one the
+// other way. Forecasting amplifies every wobble in the line, so the filters are slow (3 and 8/s)
+// and the forecast's lead is eased at kApexLeadResponse: with quicker filters (6 and 15/s) and no
+// easing, a trace at 0.5 s shook the head with ~2.8x the acceleration it had with anticipation
+// off. Replayed now it's within ~15% of off, with no reversals, and on the straights the head is
+// turned 2.5 deg on average instead of 3.5. Only the lead is eased (not the whole aim), so how
+// fast the head comes back is otherwise unchanged.
+constexpr double kApexLookAhead   = 0.6;                    // s
+constexpr double kApexMaxDeg      = 45.0;
+constexpr double kApexSpeedMin    = 3.0, kApexSpeedFull = 8.0;  // units/s
+constexpr double kApexSpringScale = 1.6;
+constexpr double kApexReturnScale = 6.0;
+constexpr double kApexDriftScale  = 2.5;                    // deg/s per unit of apexSpeed
+constexpr double kApexOtherWayMin = 15.0, kApexOtherWayFull = 40.0;  // deg/s
+constexpr double kApexQuickResponse = 40.0;               // 1/s
+constexpr double kApexTrendSlow = 3.0, kApexTrendFast = 8.0;   // 1/s
+constexpr double kApexLeadResponse = 4.0;                 // 1/s
 struct TravelSample {
     Vec3   direction;  // the direction of travel on that frame
     double rise = 0;  // upward speed (units/s)
@@ -153,6 +188,10 @@ struct State {
     double outOfFallTime = 0;    // in the air: how long the eye has read out of free fall
     Vec3   motionHeading;         // horizontal direction of the eye's velocity, last frame
     double turnRate     = 0;      // how fast that direction turns (rad/s, filtered)
+    double pathTurnRate = 0;      // the same, signed (+ = turning right)
+    double pathTurnQuick = 0;     // the same, filtered less: lags less as a corner eases off
+    double trendSlow = 0, trendFast = 0;  // the same at kApexTrendSlow / Fast, for anticipation
+    double pathSpeed    = 0;      // horizontal speed it was measured at (units/s)
     bool   turnFromBike = false;  // turnRate is measured from the bike's path (else the eye's)
     bool   deepFall     = false;  // this fall has read as deep as real airtime (whip lock)
     double whip         = 0;      // 0..1 how far whip lock has taken over (eased)
@@ -162,6 +201,9 @@ struct State {
     double lookSide     = 0;      // 0..1 how much the rider is looking sideways / back
     double lookBack     = 0;
     double headTurn     = 0;      // d-pad look: the head's turn about WorldUp (rad, + = right, eased)
+    double apexTurn     = 0;      // look to apex: the head's turn into the corner (rad, + = right, eased)
+    double apexRate     = 0;      // how fast it is turning (rad/s)
+    double apexLead     = 0;      // anticipation: the forecast's change in turn rate (rad/s, eased)
     double smoothHeight = 0;      // low-passed eye height along WorldUp
     double neckOffset   = 0;      // spring displacement along WorldUp (negative = compressed)
     double neckVelocity = 0;
@@ -265,6 +307,16 @@ void SummarizeEvents(EventLog& e, const char* what)
 double LowPassAlpha(double ratePerSecond, double dt)
 {
     return ratePerSecond > 0 ? 1.0 - std::exp(-ratePerSecond * dt) : 1.0;
+}
+
+// One step of a critically damped spring pulling x (moving at v) toward target, at angular
+// frequency omega (1/s). Solved exactly for a target held over the step, so any dt is stable.
+// It starts and stops moving gently and never overshoots.
+void CriticalSpring(double& x, double& v, double target, double omega, double dt)
+{
+    const double e = x - target, decay = std::exp(-omega * dt), k = v + omega * e;
+    x = target + (e + k * dt) * decay;
+    v = (v - omega * k * dt) * decay;
 }
 
 double SmoothStep(double edge0, double edge1, double x)
@@ -451,6 +503,49 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
                          : g_look == Look::Back  ? (s.headTurn < 0 ? -kPi : kPi)
                          : 0.0;
         s.headTurn += (aim - s.headTurn) * (snap ? 1.0 : LowPassAlpha(cfg.lookTurnSpeed, dt));
+    }
+
+    // Look to apex: the head turns the way the bike's path is turning.
+    {
+        const double headFade = 1.0 - SmoothStep(5.0, 30.0, std::fabs(s.headTurn) * kRadToDeg);
+        const double fade = SmoothStep(kApexSpeedMin, kApexSpeedFull, s.pathSpeed) * (1.0 - s.airborne) * headFade;
+        const double maxTurn = kApexMaxDeg * kDegToRad;
+        // Each filter lags a steady change in the rate by 1/its response, so their gap gives its slope.
+        const double slope = (s.trendFast - s.trendSlow) / (1.0 / kApexTrendSlow - 1.0 / kApexTrendFast);
+        const double lead = slope * cfg.apexAnticipation;
+        s.apexLead = snap ? lead : s.apexLead + (lead - s.apexLead) * LowPassAlpha(kApexLeadResponse, dt);
+        double ahead = s.pathTurnRate + s.apexLead;
+        if (ahead * s.pathTurnRate < 0)
+            ahead = 0;
+        const double aim = maxTurn * std::tanh(cfg.apexLook * kApexLookAhead * ahead * fade / maxTurn);
+        if (snap || dt <= 1e-6) {
+            s.apexTurn = aim;
+            s.apexRate = 0;
+        } else {
+            const double before = s.apexTurn;
+            const double side = before > 0 ? 1.0 : -1.0;
+            const bool unwinding = (aim - before) * side < 0;
+            double omega = cfg.apexSpeed * kApexSpringScale;
+            if (unwinding)
+                omega *= kApexReturnScale;
+            CriticalSpring(s.apexTurn, s.apexRate, aim, omega, dt);
+
+            // Unwinding (rad/s, + = back toward straight ahead): free up to what the bike's turn
+            // absorbs, eased into the drift past that. The turn is the lower of the two filtered
+            // rates: the usual one lags as a corner eases off, the quick one is noisier.
+            const double turn = s.pathTurnRate * side;
+            const double absorbed = std::fmax(std::fmin(turn, s.pathTurnQuick * side), 0.0) +
+                SmoothStep(kApexOtherWayMin * kDegToRad, kApexOtherWayFull * kDegToRad, -turn) * std::fabs(turn);
+            const double drift = cfg.apexSpeed * kApexDriftScale * kDegToRad + (1.0 - headFade) * 2.0 * kPi;
+            const auto Limit = [&](double unwind) {
+                return unwind <= absorbed ? unwind : absorbed + drift * std::tanh((unwind - absorbed) / drift);
+            };
+            const double stepUnwind = (before - s.apexTurn) * side / dt;
+            if (unwinding && stepUnwind > absorbed) {
+                s.apexTurn = before - side * Limit(stepUnwind) * dt;
+                s.apexRate = -side * Limit(-s.apexRate * side);
+            }
+        }
     }
 
     const bool onGround = s.airborne < 0.3;
@@ -669,10 +764,10 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
         smooth = Slerp(target, smooth, maxLag / lag);
     Quat rot = smooth;
 
-    // The d-pad's head turn, about WorldUp so the horizon stays where the rest left it. After
-    // the smoothing, so the head turns at its own pace.
-    if (s.headTurn != 0)
-        rot = AxisAngle(worldUp, -s.headTurn) * rot;
+    // The d-pad's and apex look's head turn, about WorldUp so the horizon stays where the rest
+    // left it. After the smoothing, so the head turns at its own pace.
+    if (s.headTurn + s.apexTurn != 0)
+        rot = AxisAngle(worldUp, -(s.headTurn + s.apexTurn)) * rot;
 
     // Neck compression also nods the head forward a little (rotation about the camera's right
     // axis; a negative angle pitches down). Uses last frame's neck, so the orientation is
@@ -700,6 +795,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     tel.viewPitchDeg      = finalAtt.pitch * kRadToDeg;
     tel.lookYawDeg        = (lookYaw + s.headTurn) * kRadToDeg;
     tel.airYawDeg         = airYaw * kRadToDeg;
+    tel.apexDeg           = s.apexTurn * kRadToDeg;
     tel.bikeTracked       = pose.tracked;
     tel.bikeFresh         = pose.tracked && pose.fresh;
     tel.customActive      = m.customWeight > 0.5;
@@ -756,7 +852,8 @@ bool FinishFrame(const double view[16], double correction[16])
         s.inAir = false;
         s.fallTime = 0;
         s.motionHeading = Vec3{};
-        s.turnRate = 0;
+        s.turnRate = s.pathTurnRate = s.pathTurnQuick = s.pathSpeed = 0;
+        s.trendSlow = s.trendFast = 0;
         s.prevPos      = rawPos;
         s.smoothHeight = Dot(rawPos, worldUp);
         g_eyeFit.Reset();
@@ -806,12 +903,17 @@ bool FinishFrame(const double view[16], double correction[16])
         if (speed > 3.0) {
             const Vec3 heading = horizontal / speed;
             if (Length(s.motionHeading) > 0.5 && dt > 1e-5)
-                rate = std::acos(Clamp(Dot(heading, s.motionHeading), -1.0, 1.0)) / dt;
+                rate = std::atan2(Dot(heading, Cross(s.motionHeading, worldUp)), Dot(heading, s.motionHeading)) / dt;
             s.motionHeading = heading;
         } else {
             s.motionHeading = Vec3{};
         }
-        s.turnRate += (rate - s.turnRate) * LowPassAlpha(10.0, dt);
+        s.turnRate += (std::fabs(rate) - s.turnRate) * LowPassAlpha(10.0, dt);
+        s.pathTurnRate += (rate - s.pathTurnRate) * LowPassAlpha(10.0, dt);
+        s.pathTurnQuick += (rate - s.pathTurnQuick) * LowPassAlpha(kApexQuickResponse, dt);
+        s.trendSlow += (rate - s.trendSlow) * LowPassAlpha(kApexTrendSlow, dt);
+        s.trendFast += (rate - s.trendFast) * LowPassAlpha(kApexTrendFast, dt);
+        s.pathSpeed = speed;
         s.turnFromBike = bikeAccel;
     }
     const bool turning = s.turnRate > kAirTurnRateDeg * kDegToRad;

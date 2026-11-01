@@ -6,7 +6,8 @@
 //   Then a rut corner whose lean-in reads as free fall, a bump in a slight turn and a whoop
 //   hopped while sliding, none of which whip lock may hold. Gravity is 3 g throughout, as MX
 //   Simulator's airtime reads in the mod's units, and the whip is ridden again with the game
-//   showing a double physics step now and then; a double out of a turn; and the d-pad looks.
+//   showing a double physics step now and then; a double out of a turn; the d-pad looks; and
+//   look to apex through flat corners.
 //   Runs in real time (the camera times frames with the clock), ~45 s.
 //
 //   Build: cl /EHsc /std:c++17 /W4 tests\whip_test.cpp src\camera.cpp src\bike.cpp src\config.cpp src\log.cpp user32.lib
@@ -443,6 +444,85 @@ LookResult LookAround()
     return result;
 }
 
+// Look to apex: riding along +x at `speed`, from 1.6 s a flat corner at `rateDeg` deg/s (+ = right)
+// for 1.5 s, easing off to straight over 0.5 s (as the corners in a trace did), then straight for 3 s.
+struct ApexResult {
+    double inTurn = 0;     // the head's turn into the corner before it eases off (deg)
+    double viewInTurn = 0; // the view vs the game camera then (includes the smoothing's lag)
+    double after = 0;      // the head's turn 3 s after the corner
+    double home = 0;       // the head's turn 0.25 s after the bike straightens
+    double swingBack = 0;  // the view's fastest turn back against the corner, from its exit (deg/s)
+};
+
+ApexResult ApexCorner(double apexLook, double rateDeg, double speed = kSpeed,
+                      double anticipation = Config{}.apexAnticipation, double exitTime = 0.5)
+{
+    Config& cfg = EditConfig();
+    cfg.customCamera = false;
+    cfg.whipLock = 0.0;
+    cfg.apexLook = apexLook;
+    cfg.apexAnticipation = anticipation;
+    camera::Reset();
+    bike::Reset();
+
+    constexpr double kTurnStart = 1.6, kTurnTime = 1.5;
+    const double kExitTime = exitTime;
+    ApexResult result;
+    double lastT = 0, yaw = 0, mark = 0, markYaw = 0;
+    V bike{ 0, 0, 0 };
+    LARGE_INTEGER frequency, start, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const double t = double(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        if (t > kTurnStart + kTurnTime + kExitTime + 3.0)
+            break;
+        const double dt = t - lastT;
+        lastT = t;
+        const bool inTurn = t > kTurnStart && t < kTurnStart + kTurnTime;
+        const double exit = t - (kTurnStart + kTurnTime);
+        const double rate = inTurn ? 1.0 : exit > 0 && exit < kExitTime ? 1.0 - exit / kExitTime : 0.0;
+        yaw += rateDeg * rate * kPi / 180 * dt;
+        bike = bike + V{ std::cos(yaw), 0, std::sin(yaw) } * (speed * dt);
+        const double roll = rate * (rateDeg > 0 ? -30.0 : 30.0) * kPi / 180;  // leaned in
+        double m[16];
+        View({ 0, 0, 0 }, yaw, 0, roll, m);
+        const V up{ m[1], m[5], m[9] };
+        const camera::Telemetry& tel = Draw(bike, bike + up * 1.0, yaw, 0, roll);
+        if (inTurn) {
+            result.inTurn = tel.apexDeg;
+            result.viewInTurn = Wrap(tel.outYaw - tel.rawYaw);
+            g_bikeLost |= !tel.bikeTracked && speed > 5.0;  // at walking pace it needs longer to find the bike
+        }
+        result.after = tel.apexDeg;
+        if (exit < kExitTime + 0.25)
+            result.home = tel.apexDeg;
+        // How fast the view turns back against the corner once it eases off (over 0.05 s
+        // stretches, as the frames are uneven): what reads as the head snapping back.
+        if (exit > 0) {
+            if (t - mark >= 0.05) {
+                const double back = -Wrap(tel.outYaw - markYaw) * (rateDeg > 0 ? 1.0 : -1.0) / (t - mark);
+                result.swingBack = std::fmax(result.swingBack, back);
+                mark = t;
+                markYaw = tel.outYaw;
+            }
+        } else {
+            mark = t;
+            markYaw = tel.outYaw;
+        }
+        static double lastPrint = 0;
+        if (g_verbose && apexLook > 0 && t > kTurnStart - 0.1 && t - lastPrint > 0.1) {
+            lastPrint = t;
+            printf("    t=%.2f apex %+5.1f view-game yaw %+5.1f\n", t, tel.apexDeg, Wrap(tel.outYaw - tel.rawYaw));
+        }
+        Sleep(7);
+    }
+    cfg.apexLook = 0.0;
+    cfg.apexAnticipation = Config{}.apexAnticipation;
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -498,6 +578,33 @@ int main(int argc, char** argv)
     Check(std::fabs(look.left + 90) < 2, "d-pad left looks 90 deg to the left");
     Check(std::fabs(look.ahead) < 2, "releasing the d-pad looks ahead again");
     Check(look.maxRoll < 1, "looking around keeps the horizon level");
+
+    printf("Look to apex: a flat 60 deg/s corner for 1.5 s, easing off over 0.5 s (apex turn speed 2.5)\n");
+    const double full = 45.0 * std::tanh(0.6 * 60.0 / 45.0), half = 45.0 * std::tanh(0.3 * 60.0 / 45.0);
+    const ApexResult apexOff = ApexCorner(0.0, 60.0), apexRight = ApexCorner(1.0, 60.0);
+    const ApexResult apexHalf = ApexCorner(0.5, 60.0), apexLeft = ApexCorner(1.0, -60.0);
+    const ApexResult apexSlow = ApexCorner(1.0, 60.0, 2.0);
+    // Real corners in traces opened up over a second or more; a quick exit leaves little to forecast.
+    const ApexResult apexGradual = ApexCorner(1.0, 60.0, kSpeed, Config{}.apexAnticipation, 1.5);
+    const ApexResult apexLate = ApexCorner(1.0, 60.0, kSpeed, 0.0, 1.5);
+    printf("  head turned into the corner: off %+.1f, 100%% right %+.1f (view %+.1f), 50%% %+.1f, 100%% left %+.1f, "
+           "walking pace %+.1f deg\n", apexOff.inTurn, apexRight.inTurn, apexRight.viewInTurn,
+           apexHalf.inTurn, apexLeft.inTurn, apexSlow.inTurn);
+    Check(apexOff.inTurn == 0, "look to apex off doesn't turn the head");
+    Check(std::fabs(apexRight.inTurn - full) < 3, "100% looks about 30 deg into a 60 deg/s right-hander");
+    Check(apexRight.viewInTurn > apexOff.viewInTurn + full - 3, "the view itself turns into the corner");
+    Check(std::fabs(apexHalf.inTurn - half) < 3, "50% looks about 17 deg into it");
+    Check(std::fabs(apexLeft.inTurn + full) < 3, "a left-hander looks left");
+    Check(std::fabs(apexSlow.inTurn) < 1, "turning at walking pace doesn't look to the apex");
+    printf("  coming out: the view swings back at most %.1f deg/s (%.1f with it off); 3 s after: %+.1f deg\n",
+           apexRight.swingBack, apexOff.swingBack, apexRight.after);
+    Check(std::fabs(apexRight.after) < 2, "after the corner the head looks ahead again");
+    printf("  easing off over 1.5 s, 0.25 s after the bike straightens: %+.1f deg (%+.1f with anticipation "
+           "off); swinging back at most %.1f deg/s\n", apexGradual.home, apexLate.home, apexGradual.swingBack);
+    Check(apexGradual.home < apexLate.home - 2.0, "anticipation brings the head back sooner on the exit");
+    Check(apexGradual.swingBack < apexOff.swingBack + 8.0, "anticipating the exit doesn't snap the head back");
+    // Unwinding on the spring alone (before the limit), the view swung back at ~36 deg/s here.
+    Check(apexRight.swingBack < apexOff.swingBack + 8.0, "the head unwinds with the bike instead of snapping back");
     Check(!g_bikeLost, "the bike tracker had the bike throughout (the game's path was tested)");
     printf(g_failures ? "%d check(s) failed\n" : "All checks passed\n", g_failures);
     return g_failures ? 1 : 0;
