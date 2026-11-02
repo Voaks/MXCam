@@ -742,7 +742,7 @@ const RowDef kRows[] = {
               "with the bike, 100% keeps the view steady."),
     Slider(0, "HEAD POSITION",  "Head forward / back", &Config::headForward,      -3.0,  3.0,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes forward (+) or back (-) along the bike."),
-    Slider(0, nullptr,          "Head height",         &Config::headHeight,       -0.6,  0.6,  0.01, 1.0,   2, " m")
+    Slider(0, nullptr,          "Head height",         &Config::headHeight,       -3.0,  3.0,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes up (+) or down (-)."),
     Toggle(0, nullptr,          "Hide torso & head",   &Config::hideOwnBody)
         .Help("Hides your own rider's torso and head (helmet included), so a high FOV doesn't show "
